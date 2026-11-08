@@ -1007,41 +1007,46 @@ public final class Raider extends JavaPlugin implements Listener {
     void buildModel(Base b) {
         World w = b.w();
         if (w == null) return;
-        clearModel(b);
-        int L = b.level, i = L - 1;
-        Location o = new Location(w, b.x + 0.5, b.y + 1, b.z + 0.5);
+        try {
+            clearModel(b);
+            int L = b.level, i = L - 1;
+            Location o = new Location(w, b.x + 0.5, b.y + 1, b.z + 0.5);
 
-        part(b, o, AA_BODY[i], -0.5f, 0f, -0.5f, 1f, 0.2f, 1f, null, false);
-        float ch = 0.3f + 0.02f * L, cw = 0.45f + 0.01f * L;
-        part(b, o, AA_BODY[i], -cw / 2, 0.2f, -cw / 2, cw, ch, cw, null, false);
-        float hy = 0.2f + ch, hw = 0.6f + 0.015f * L;
-        part(b, o, AA_HEAD[i], -hw / 2, hy, -hw / 2, hw, 0.3f, hw, null, L >= 15);
+            part(b, o, AA_BODY[i], -0.5f, 0f, -0.5f, 1f, 0.2f, 1f, null, false);
+            float ch = 0.3f + 0.02f * L, cw = 0.45f + 0.01f * L;
+            part(b, o, AA_BODY[i], -cw / 2, 0.2f, -cw / 2, cw, ch, cw, null, false);
+            float hy = 0.2f + ch, hw = 0.6f + 0.015f * L;
+            part(b, o, AA_HEAD[i], -hw / 2, hy, -hw / 2, hw, 0.3f, hw, null, L >= 15);
 
-        int n = barrels(L);
-        float r = Math.min(0.3f, 0.1f + 0.03f * n), len = 0.6f + 0.05f * L, bw = 0.1f;
-        for (int k = 0; k < n; k++) {
-            double a = 2 * Math.PI * k / n;
-            float cx = (float) Math.cos(a) * r, cz = (float) Math.sin(a) * r;
-            Quaternionf q = new Quaternionf().rotateAxis((float) Math.toRadians(10 + L / 2.0),
-                    (float) Math.sin(a), 0f, (float) -Math.cos(a));
-            part(b, o, AA_BARREL[i], cx - bw / 2, hy + 0.3f, cz - bw / 2, bw, len, bw, q, false);
+            int n = barrels(L);
+            float r = Math.min(0.3f, 0.1f + 0.03f * n), len = 0.6f + 0.05f * L, bw = 0.1f;
+            for (int k = 0; k < n; k++) {
+                double a = 2 * Math.PI * k / n;
+                float cx = (float) Math.cos(a) * r, cz = (float) Math.sin(a) * r;
+                Quaternionf q = new Quaternionf().rotateAxis((float) Math.toRadians(10 + L / 2.0),
+                        (float) Math.sin(a), 0f, (float) -Math.cos(a));
+                part(b, o, AA_BARREL[i], cx - bw / 2, hy + 0.3f, cz - bw / 2, bw, len, bw, q, false);
+            }
+            if (L >= 5) {
+                for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
+                    part(b, o, AA_BODY[i], sx * 0.42f - 0.06f, 0.2f, sz * 0.42f - 0.06f, 0.12f, 0.35f, 0.12f, null, false);
+            }
+            if (L >= 10) {
+                part(b, o, Material.LIGHTNING_ROD, 0.3f, 0.2f, -0.45f, 0.1f, 0.9f, 0.1f, null, false);
+                part(b, o, Material.TARGET, 0.1f, 1.05f, -0.65f, 0.5f, 0.1f, 0.5f, null, L >= 15);
+            }
+            if (L >= 15) {
+                part(b, o, AA_BODY[i], -1.0f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
+                part(b, o, AA_BODY[i], 0.5f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
+            }
+            if (L >= 20) {
+                part(b, o, Material.BEACON, -0.2f, hy + 0.31f, -0.2f, 0.4f, 0.4f, 0.4f, null, true);
+            }
+            b.modelLevel = L;
+        } catch (NoClassDefFoundError | Exception ex) {
+            getLogger().warning("Не удалось построить модель (возможно, отсутствует JOML или несовместимая версия сервера): " + ex.getMessage());
+            // Не прерываем работу, просто пропускаем построение модели
         }
-        if (L >= 5) {
-            for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
-                part(b, o, AA_BODY[i], sx * 0.42f - 0.06f, 0.2f, sz * 0.42f - 0.06f, 0.12f, 0.35f, 0.12f, null, false);
-        }
-        if (L >= 10) {
-            part(b, o, Material.LIGHTNING_ROD, 0.3f, 0.2f, -0.45f, 0.1f, 0.9f, 0.1f, null, false);
-            part(b, o, Material.TARGET, 0.1f, 1.05f, -0.65f, 0.5f, 0.1f, 0.5f, null, L >= 15);
-        }
-        if (L >= 15) {
-            part(b, o, AA_BODY[i], -1.0f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
-            part(b, o, AA_BODY[i], 0.5f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
-        }
-        if (L >= 20) {
-            part(b, o, Material.BEACON, -0.2f, hy + 0.31f, -0.2f, 0.4f, 0.4f, 0.4f, null, true);
-        }
-        b.modelLevel = L;
     }
 
     // ===== События =====
@@ -1230,8 +1235,19 @@ public final class Raider extends JavaPlugin implements Listener {
         }
         switch (a[0].toLowerCase()) {
             case "give" -> {
-                Player t = a.length > 1 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player p ? p : null);
-                if (t == null) { s.sendMessage("Игрок не найден."); return true; }
+                Player t = null;
+                if (a.length > 1) {
+                    t = Bukkit.getPlayerExact(a[1]);
+                    if (t == null) {
+                        s.sendMessage(ChatColor.RED + "Игрок " + a[1] + " не найден или не в сети.");
+                        return true;
+                    }
+                } else if (s instanceof Player p) {
+                    t = p;
+                } else {
+                    s.sendMessage(ChatColor.RED + "Из консоли нужно указать имя игрока: /raider give <игрок> [кол-во]");
+                    return true;
+                }
                 int n = 1;
                 try { if (a.length > 2) n = Math.max(1, Math.min(64, Integer.parseInt(a[2]))); } catch (NumberFormatException ignored) { }
                 t.getInventory().addItem(core(n));
