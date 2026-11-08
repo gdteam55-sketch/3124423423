@@ -121,16 +121,7 @@ public final class Raider extends JavaPlugin implements Listener {
 
     static final class Stuck { Location last; int bad; int fly; }
 
-    // ВАЖНО: Инициализируем NamespacedKey сразу при объявлении, а не в onEnable!
-    // Это гарантирует, что они не будут null в момент вызова команд.
-    private final NamespacedKey CORE = new NamespacedKey(this, "core");
-    private final NamespacedKey ROLE = new NamespacedKey(this, "role");
-    private final NamespacedKey BASE = new NamespacedKey(this, "base");
-    private final NamespacedKey MODEL = new NamespacedKey(this, "model");
-    private final NamespacedKey AA = new NamespacedKey(this, "aa");
-    private final NamespacedKey DEF = new NamespacedKey(this, "defender");
-    private final NamespacedKey THROW = new NamespacedKey(this, "vthrow");
-
+    NamespacedKey CORE, ROLE, BASE, MODEL, AA, DEF, THROW;
     final Map<String, Base> bases = new HashMap<>();
     final Set<UUID> mobs = new HashSet<>();
     final Map<UUID, Integer> bees = new HashMap<>();
@@ -148,10 +139,34 @@ public final class Raider extends JavaPlugin implements Listener {
     int minDist() { return ci("spawn.min-distance"); }
     int maxDist() { return Math.max(ci("spawn.max-distance"), minDist() + 1); }
 
+    /** Настройки по умолчанию лежат прямо в коде, поэтому отдельный config.yml в jar не нужен. */
+    void loadDefaults() {
+        Object[][] d = {
+                {"attackers.base-count", 12}, {"attackers.per-wave", 6}, {"attackers.multiplier", 1.0},
+                {"attackers.max-per-wave", 150}, {"attackers.max-alive", 300}, {"attackers.special-chance", 0.35},
+                {"attackers.kamikaze-base", 3}, {"attackers.kamikaze-per-wave", 2}, {"attackers.kamikaze-max", 40},
+                {"spawn.min-distance", 50}, {"spawn.max-distance", 75},
+                {"timing.wait-seconds", 30}, {"timing.negotiate-seconds", 120}, {"timing.wave-seconds", 90},
+                {"siren.enabled", true}, {"siren.radius", 120},
+                {"villagers.help", true}, {"villagers.max", 12}, {"villagers.chance", 0.5},
+                {"chest-chance", 7}};
+        for (Object[] e : d) getConfig().addDefault((String) e[0], e[1]);
+        getConfig().options().copyDefaults(true);
+        saveConfig();
+    }
+
     // ===== Жизненный цикл =====
     @Override
     public void onEnable() {
-        saveDefaultConfig();
+        // Ключи создаём первыми, чтобы они не оставались null при любой ошибке ниже
+        CORE = new NamespacedKey(this, "core");
+        ROLE = new NamespacedKey(this, "role");
+        BASE = new NamespacedKey(this, "base");
+        MODEL = new NamespacedKey(this, "model");
+        AA = new NamespacedKey(this, "aa");
+        DEF = new NamespacedKey(this, "defender");
+        THROW = new NamespacedKey(this, "vthrow");
+        loadDefaults();
         getDataFolder().mkdirs();
         dataFile = new File(getDataFolder(), "data.yml");
         load();
@@ -209,13 +224,8 @@ public final class Raider extends JavaPlugin implements Listener {
     void say(String s) { Bukkit.broadcastMessage(ChatColor.RED + "[Raider] " + s); }
 
     ItemStack core(int n) {
-        if (CORE == null) {
-            getLogger().severe("Ошибка: NamespacedKey CORE не инициализирован! Проверьте onEnable().");
-            return new ItemStack(CORE_MAT, n);
-        }
         ItemStack it = new ItemStack(CORE_MAT, n);
         ItemMeta m = it.getItemMeta();
-        if (m == null) return it;
         m.setDisplayName(ChatColor.DARK_PURPLE + "Ядро Рейдера");
         m.setLore(List.of(ChatColor.GRAY + "Его жаждут все враждебные мобы",
                 ChatColor.GRAY + "Зенитка: прокачивай землёй (ПКМ по ядру)"));
@@ -1014,45 +1024,41 @@ public final class Raider extends JavaPlugin implements Listener {
     void buildModel(Base b) {
         World w = b.w();
         if (w == null) return;
-        try {
-            clearModel(b);
-            int L = b.level, i = L - 1;
-            Location o = new Location(w, b.x + 0.5, b.y + 1, b.z + 0.5);
+        clearModel(b);
+        int L = b.level, i = L - 1;
+        Location o = new Location(w, b.x + 0.5, b.y + 1, b.z + 0.5);
 
-            part(b, o, AA_BODY[i], -0.5f, 0f, -0.5f, 1f, 0.2f, 1f, null, false);
-            float ch = 0.3f + 0.02f * L, cw = 0.45f + 0.01f * L;
-            part(b, o, AA_BODY[i], -cw / 2, 0.2f, -cw / 2, cw, ch, cw, null, false);
-            float hy = 0.2f + ch, hw = 0.6f + 0.015f * L;
-            part(b, o, AA_HEAD[i], -hw / 2, hy, -hw / 2, hw, 0.3f, hw, null, L >= 15);
+        part(b, o, AA_BODY[i], -0.5f, 0f, -0.5f, 1f, 0.2f, 1f, null, false);
+        float ch = 0.3f + 0.02f * L, cw = 0.45f + 0.01f * L;
+        part(b, o, AA_BODY[i], -cw / 2, 0.2f, -cw / 2, cw, ch, cw, null, false);
+        float hy = 0.2f + ch, hw = 0.6f + 0.015f * L;
+        part(b, o, AA_HEAD[i], -hw / 2, hy, -hw / 2, hw, 0.3f, hw, null, L >= 15);
 
-            int n = barrels(L);
-            float r = Math.min(0.3f, 0.1f + 0.03f * n), len = 0.6f + 0.05f * L, bw = 0.1f;
-            for (int k = 0; k < n; k++) {
-                double a = 2 * Math.PI * k / n;
-                float cx = (float) Math.cos(a) * r, cz = (float) Math.sin(a) * r;
-                Quaternionf q = new Quaternionf().rotateAxis((float) Math.toRadians(10 + L / 2.0),
-                        (float) Math.sin(a), 0f, (float) -Math.cos(a));
-                part(b, o, AA_BARREL[i], cx - bw / 2, hy + 0.3f, cz - bw / 2, bw, len, bw, q, false);
-            }
-            if (L >= 5) {
-                for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
-                    part(b, o, AA_BODY[i], sx * 0.42f - 0.06f, 0.2f, sz * 0.42f - 0.06f, 0.12f, 0.35f, 0.12f, null, false);
-            }
-            if (L >= 10) {
-                part(b, o, Material.LIGHTNING_ROD, 0.3f, 0.2f, -0.45f, 0.1f, 0.9f, 0.1f, null, false);
-                part(b, o, Material.TARGET, 0.1f, 1.05f, -0.65f, 0.5f, 0.1f, 0.5f, null, L >= 15);
-            }
-            if (L >= 15) {
-                part(b, o, AA_BODY[i], -1.0f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
-                part(b, o, AA_BODY[i], 0.5f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
-            }
-            if (L >= 20) {
-                part(b, o, Material.BEACON, -0.2f, hy + 0.31f, -0.2f, 0.4f, 0.4f, 0.4f, null, true);
-            }
-            b.modelLevel = L;
-        } catch (NoClassDefFoundError | Exception ex) {
-            getLogger().warning("Не удалось построить модель (возможно, отсутствует JOML или несовместимая версия сервера): " + ex.getMessage());
+        int n = barrels(L);
+        float r = Math.min(0.3f, 0.1f + 0.03f * n), len = 0.6f + 0.05f * L, bw = 0.1f;
+        for (int k = 0; k < n; k++) {
+            double a = 2 * Math.PI * k / n;
+            float cx = (float) Math.cos(a) * r, cz = (float) Math.sin(a) * r;
+            Quaternionf q = new Quaternionf().rotateAxis((float) Math.toRadians(10 + L / 2.0),
+                    (float) Math.sin(a), 0f, (float) -Math.cos(a));
+            part(b, o, AA_BARREL[i], cx - bw / 2, hy + 0.3f, cz - bw / 2, bw, len, bw, q, false);
         }
+        if (L >= 5) {
+            for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
+                part(b, o, AA_BODY[i], sx * 0.42f - 0.06f, 0.2f, sz * 0.42f - 0.06f, 0.12f, 0.35f, 0.12f, null, false);
+        }
+        if (L >= 10) {
+            part(b, o, Material.LIGHTNING_ROD, 0.3f, 0.2f, -0.45f, 0.1f, 0.9f, 0.1f, null, false);
+            part(b, o, Material.TARGET, 0.1f, 1.05f, -0.65f, 0.5f, 0.1f, 0.5f, null, L >= 15);
+        }
+        if (L >= 15) {
+            part(b, o, AA_BODY[i], -1.0f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
+            part(b, o, AA_BODY[i], 0.5f, 0.2f, -0.15f, 0.5f, 0.12f, 0.3f, null, false);
+        }
+        if (L >= 20) {
+            part(b, o, Material.BEACON, -0.2f, hy + 0.31f, -0.2f, 0.4f, 0.4f, 0.4f, null, true);
+        }
+        b.modelLevel = L;
     }
 
     // ===== События =====
@@ -1241,28 +1247,12 @@ public final class Raider extends JavaPlugin implements Listener {
         }
         switch (a[0].toLowerCase()) {
             case "give" -> {
-                Player t = null;
-                if (a.length > 1) {
-                    t = Bukkit.getPlayerExact(a[1]);
-                    if (t == null) {
-                        s.sendMessage(ChatColor.RED + "Игрок " + a[1] + " не найден или не в сети.");
-                        return true;
-                    }
-                } else if (s instanceof Player p) {
-                    t = p;
-                } else {
-                    s.sendMessage(ChatColor.RED + "Из консоли нужно указать имя игрока: /raider give <игрок> [кол-во]");
-                    return true;
-                }
+                Player t = a.length > 1 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player p ? p : null);
+                if (t == null) { s.sendMessage("Игрок не найден."); return true; }
                 int n = 1;
                 try { if (a.length > 2) n = Math.max(1, Math.min(64, Integer.parseInt(a[2]))); } catch (NumberFormatException ignored) { }
-                ItemStack coreItem = core(n);
-                if (coreItem != null) {
-                    t.getInventory().addItem(coreItem);
-                    s.sendMessage("Выдано Ядро x" + n + " игроку " + t.getName());
-                } else {
-                    s.sendMessage(ChatColor.RED + "Ошибка создания ядра. Проверьте консоль.");
-                }
+                t.getInventory().addItem(core(n));
+                s.sendMessage("Выдано Ядро x" + n + " игроку " + t.getName());
             }
             case "start" -> {
                 Base b = nearestBase(s);
