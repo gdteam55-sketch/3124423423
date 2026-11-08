@@ -121,7 +121,16 @@ public final class Raider extends JavaPlugin implements Listener {
 
     static final class Stuck { Location last; int bad; int fly; }
 
-    NamespacedKey CORE, ROLE, BASE, MODEL, AA, DEF, THROW;
+    // ВАЖНО: Инициализируем NamespacedKey сразу при объявлении, а не в onEnable!
+    // Это гарантирует, что они не будут null в момент вызова команд.
+    private final NamespacedKey CORE = new NamespacedKey(this, "core");
+    private final NamespacedKey ROLE = new NamespacedKey(this, "role");
+    private final NamespacedKey BASE = new NamespacedKey(this, "base");
+    private final NamespacedKey MODEL = new NamespacedKey(this, "model");
+    private final NamespacedKey AA = new NamespacedKey(this, "aa");
+    private final NamespacedKey DEF = new NamespacedKey(this, "defender");
+    private final NamespacedKey THROW = new NamespacedKey(this, "vthrow");
+
     final Map<String, Base> bases = new HashMap<>();
     final Set<UUID> mobs = new HashSet<>();
     final Map<UUID, Integer> bees = new HashMap<>();
@@ -143,13 +152,6 @@ public final class Raider extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        CORE = new NamespacedKey(this, "core");
-        ROLE = new NamespacedKey(this, "role");
-        BASE = new NamespacedKey(this, "base");
-        MODEL = new NamespacedKey(this, "model");
-        AA = new NamespacedKey(this, "aa");
-        DEF = new NamespacedKey(this, "defender");
-        THROW = new NamespacedKey(this, "vthrow");
         getDataFolder().mkdirs();
         dataFile = new File(getDataFolder(), "data.yml");
         load();
@@ -207,8 +209,13 @@ public final class Raider extends JavaPlugin implements Listener {
     void say(String s) { Bukkit.broadcastMessage(ChatColor.RED + "[Raider] " + s); }
 
     ItemStack core(int n) {
+        if (CORE == null) {
+            getLogger().severe("Ошибка: NamespacedKey CORE не инициализирован! Проверьте onEnable().");
+            return new ItemStack(CORE_MAT, n);
+        }
         ItemStack it = new ItemStack(CORE_MAT, n);
         ItemMeta m = it.getItemMeta();
+        if (m == null) return it;
         m.setDisplayName(ChatColor.DARK_PURPLE + "Ядро Рейдера");
         m.setLore(List.of(ChatColor.GRAY + "Его жаждут все враждебные мобы",
                 ChatColor.GRAY + "Зенитка: прокачивай землёй (ПКМ по ядру)"));
@@ -1045,7 +1052,6 @@ public final class Raider extends JavaPlugin implements Listener {
             b.modelLevel = L;
         } catch (NoClassDefFoundError | Exception ex) {
             getLogger().warning("Не удалось построить модель (возможно, отсутствует JOML или несовместимая версия сервера): " + ex.getMessage());
-            // Не прерываем работу, просто пропускаем построение модели
         }
     }
 
@@ -1250,8 +1256,13 @@ public final class Raider extends JavaPlugin implements Listener {
                 }
                 int n = 1;
                 try { if (a.length > 2) n = Math.max(1, Math.min(64, Integer.parseInt(a[2]))); } catch (NumberFormatException ignored) { }
-                t.getInventory().addItem(core(n));
-                s.sendMessage("Выдано Ядро x" + n + " игроку " + t.getName());
+                ItemStack coreItem = core(n);
+                if (coreItem != null) {
+                    t.getInventory().addItem(coreItem);
+                    s.sendMessage("Выдано Ядро x" + n + " игроку " + t.getName());
+                } else {
+                    s.sendMessage(ChatColor.RED + "Ошибка создания ядра. Проверьте консоль.");
+                }
             }
             case "start" -> {
                 Base b = nearestBase(s);
