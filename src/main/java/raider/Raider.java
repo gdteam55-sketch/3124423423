@@ -2560,7 +2560,7 @@ public final class Raider extends JavaPlugin implements Listener {
             for (int y = gy - 1; y >= gy - 4; y--) {
                 Block b = w.getBlockAt(x, y, z);
                 Material m = b.getType();
-                if (!m.isSolid() || m.isLiquid()) b.setType(Material.DIRT, false);
+                if (!m.isSolid() || m == Material.WATER || m == Material.LAVA) b.setType(Material.DIRT, false);
             }
         }
     }
