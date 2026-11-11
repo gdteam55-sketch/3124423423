@@ -3726,7 +3726,7 @@ public final class Raider extends JavaPlugin implements Listener {
         } else if (role.equals("pump")) {
             if (sh.water <= 0) { p.sendMessage(ChatColor.GRAY + "В трюме сухо."); return; }
             sh.water = Math.max(0, sh.water - cd("ship.pump-amount"));
-            p.getWorld().playSound(p.getLocation(), Sound.BLOCK_BUBBLE_COLUMN_UPWARD_INSIDE, 1f, 1.3f);
+            p.getWorld().playSound(p.getLocation(), Sound.ENTITY_PLAYER_SPLASH, 1f, 1.3f);
             p.getWorld().spawnParticle(Particle.SPLASH, lp(sh, -3, 2.4, 1.2), 12, 0.2, 0.2, 0.2, 0.1);
             p.sendMessage(ChatColor.AQUA + "Откачиваю... воды в трюме: " + (int) sh.water + "%");
         } else if (role.startsWith("c")) {
