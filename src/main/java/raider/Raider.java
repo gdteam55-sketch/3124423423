@@ -159,10 +159,12 @@ public final class Raider extends JavaPlugin implements Listener {
             {"grenade", "23", "4"}, {"grenade_fire", "24", "4"}, {"mine", "25", "2"},
             {"shovel_iron", "28", "1"}, {"shovel_diamond", "29", "1"}, {"shovel_netherite", "30", "1"},
             {"radio", "31", "1"}, {"gturret", "32", "1"}, {"heli", "33", "1"}, {"nuke", "34", "1"},
-            {"missile_s", "37", "1"}, {"missile_m", "38", "1"}, {"missile_l", "39", "1"}};
+            {"missile_s", "37", "1"}, {"missile_m", "38", "1"}, {"missile_l", "39", "1"},
+            {"armor_plate", "17", "4"}, {"grenade_smoke", "26", "4"},
+            {"plane_f", "40", "1"}, {"plane_b", "41", "1"}, {"ship", "42", "1"}};
     static final List<String> ITEM_IDS = List.of("core", "turret", "gturret", "vest_light", "vest_heavy", "vest_assault", "helmet", "boots",
             "rifle", "mg", "sniper", "ammo", "grenade", "grenade_fire", "shovel_iron", "shovel_diamond", "shovel_netherite",
-            "radio", "nuke", "hedgehog", "mine", "heli", "missile_s", "missile_m", "missile_l");
+            "radio", "nuke", "hedgehog", "mine", "heli", "missile_s", "missile_m", "missile_l", "armor_plate", "grenade_smoke", "plane_f", "plane_b", "ship");
 
     static final Map<String, String> ALIASES = Map.ofEntries(
             Map.entry("count", "attackers.base-count"), Map.entry("perwave", "attackers.per-wave"),
@@ -226,7 +228,41 @@ public final class Raider extends JavaPlugin implements Listener {
         World w() { return Bukkit.getWorld(world); }
     }
 
-    static final class Heli { final List<BlockDisplay> parts = new ArrayList<>(); BlockDisplay rotorA, rotorB, tail; double rot = 0; long lastGun = 0, lastRocket = 0; }
+    static final class Smoke { World w; double x, y, z, r; long until; }
+
+    static final class Heli { final List<BlockDisplay> parts = new ArrayList<>(); BlockDisplay rotorA, rotorB, tail; double rot = 0; long lastGun = 0, lastRocket = 0; double baseFly = -1, baseMove = -1, appliedMul = -1; String kind = "heli"; }
+
+    static final class Ship {
+        String id, world, owner = "";
+        int x, y, z, dir;
+        double hp, water, dip;
+        boolean enemy, sinking;
+        int sinkT;
+        UUID helm;
+        long lastStep, lastFire, lastWarn;
+        final long[] cl = new long[5];
+        final List<Integer> holes = new ArrayList<>();
+        final List<BlockDisplay> parts = new ArrayList<>();
+        final List<Interaction> ints = new ArrayList<>();
+        final List<double[]> specs = new ArrayList<>();
+        World w() { return Bukkit.getWorld(world); }
+    }
+
+    static final int[] DIRX = {0, -1, 0, 1}, DIRZ = {1, 0, -1, 0};
+    static final List<int[]> SHIP_CELLS = new ArrayList<>();
+    static final int[] CFZ = {3, 3, -2, -2, 5}, CSD = {-1, 1, -1, 1, 0};
+    static final int[] HFZ = {-5, -1, 0, 1, 4};
+    static {
+        for (int fz = -6; fz <= 6; fz++) for (int rx = -2; rx <= 2; rx++) SHIP_CELLS.add(new int[]{fz, rx, 0});
+        for (int fz = -6; fz <= 6; fz++) {
+            if (fz == -6 || fz == 6) { for (int rx = -2; rx <= 2; rx++) SHIP_CELLS.add(new int[]{fz, rx, 1}); }
+            else if (Math.abs(fz) > 1) { SHIP_CELLS.add(new int[]{fz, -2, 1}); SHIP_CELLS.add(new int[]{fz, 2, 1}); }
+        }
+        SHIP_CELLS.add(new int[]{2, 0, 1});
+        SHIP_CELLS.add(new int[]{2, 0, 2});
+    }
+
+    static final class Airfield { String world; int x, y, z; boolean ns; World w() { return Bukkit.getWorld(world); } }
 
     static final class Missile {
         World w; Location from, to; int kind; double t = 0, total, speed; UUID owner; final List<BlockDisplay> parts = new ArrayList<>();
@@ -235,16 +271,22 @@ public final class Raider extends JavaPlugin implements Listener {
 
     static final class Menu implements InventoryHolder {
         final String type; final UUID target; Inventory inv;
-        int mx, mz, scale = 64, tx, tz; boolean has = false; String mis = "";
+        int mx, mz, scale = 64, tx, tz; boolean has = false; String mis = "", pk = "";
         Menu(String type, UUID target) { this.type = type; this.target = target; }
         @Override public Inventory getInventory() { return inv; }
     }
 
     NamespacedKey CORE, ROLE, BASE, MODEL, AA, DEF, THROW, ITEM, TLEVEL, BULLET, GREN, ALLY,
-            V_WEAPON, V_ARMOR, V_AIM, V_RATE, V_HP, V_REPAIR, SID, POST, HELI, PROPK;
+            V_WEAPON, V_ARMOR, V_AIM, V_RATE, V_HP, V_REPAIR, SID, POST, HELI, PROPK, HBASE, SHIPK, CBALL;
     final Map<String, Base> bases = new HashMap<>();
     final Map<String, Turret> turrets = new HashMap<>();
     final Map<String, Prop> props = new HashMap<>();
+    final Set<String> shielded = new HashSet<>();
+    final List<Smoke> smokes = new ArrayList<>();
+    final List<Airfield> airfields = new ArrayList<>();
+    final List<Ship> ships = new ArrayList<>();
+    final List<Fireball> cballs = new ArrayList<>();
+    int pirTimer = 0;
     final Set<UUID> soldiers = new HashSet<>();
     final List<Settlement> settlements = new ArrayList<>();
     final ArrayDeque<Runnable> buildQueue = new ArrayDeque<>();
@@ -418,6 +460,25 @@ public final class Raider extends JavaPlugin implements Listener {
         d("prices.mine", 60, "Цена: 2 противотанковые мины");
         d("prices.gturret", 200, "Цена: наземная турель");
         d("prices.heli", 900, "Цена: вертолёт");
+        d("prices.ship", 1600, "Цена: пиратский корабль");
+        d("ship.health", 200, "Прочность корпуса корабля");
+        d("ship.pirate-health", 220, "Прочность вражеского пиратского корабля");
+        d("ship.cannon-damage", 28, "Урон корпусу от попадания ядра");
+        d("ship.cannon-interval-ticks", 50, "Перезарядка корабельной пушки (тики)");
+        d("ship.cannon-power", 1.5, "Мощность взрыва ядра о землю/блоки");
+        d("ship.cannon-speed", 2.2, "Скорость ядра");
+        d("ship.splash-damage", 5.0, "Урон людям на палубе рядом с попаданием");
+        d("ship.leak-per-hole", 1.6, "Сколько % воды в секунду набирается через одну пробоину");
+        d("ship.pump-amount", 3.0, "Сколько % воды убирает один ПКМ по помпе");
+        d("ship.step-ticks", 4, "Ход корабля: 1 блок за столько тиков (меньше = быстрее)");
+        d("ship.pirates-enabled", true, "Пиратские корабли появляются рядом с твоим кораблём");
+        d("ship.pirate-spawn-seconds", 240, "Раз во сколько секунд может появиться пират");
+        d("ship.pirate-max", 2, "Максимум пиратских кораблей одновременно");
+        d("ship.pirate-range", 34, "Дистанция, с которой пират начинает бортовой огонь");
+        d("ship.pirate-fire-ticks", 70, "Интервал залпов пирата (тики)");
+        d("ship.pirate-loot-dirt", 96, "Сколько земли выпадает с потопленного пирата");
+        d("prices.plane_f", 1400, "Цена: истребитель");
+        d("prices.plane_b", 1800, "Цена: бомбардировщик");
         d("prices.missile_s", 500, "Цена: ракета малая");
         d("prices.missile_m", 900, "Цена: ракета средняя (кассетная)");
         d("prices.missile_l", 1800, "Цена: ракета большая (термобарическая)");
@@ -452,6 +513,25 @@ public final class Raider extends JavaPlugin implements Listener {
         d("heli.scale", 0.3, "Размер «посадочного» существа вертолёта (если пассажиры сидят не там, подстрой)");
         d("heli.model-y", 0.0, "Сдвиг модели вертолёта по высоте");
         d("heli.max-passengers", 2, "Мест в вертолёте");
+        d("heli.speed-multiplier", 4.0, "Скорость вертолёта (1.0 = как у гаста, 4.0 = в 4 раза быстрее)");
+        d("prices.armor_plate", 50, "Цена: 4 броне-пластины");
+        d("prices.grenade_smoke", 40, "Цена: 4 дымовые гранаты");
+        d("weapons.smoke-radius", 9.0, "Радиус дымовой завесы");
+        d("weapons.smoke-seconds", 20, "Сколько секунд держится дым");
+        d("plane.speed-multiplier", 8.0, "Скорость самолётов (1.0 = как у гаста)");
+        d("plane.bomber-speed-factor", 0.8, "Бомбардировщик медленнее истребителя во столько раз");
+        d("plane.health", 160, "Здоровье самолёта");
+        d("plane.max-passengers", 2, "Мест в самолёте");
+        d("plane.cannon-damage", 9.0, "Урон пушек истребителя (ЛКМ)");
+        d("plane.cannon-interval-ticks", 2, "Интервал выстрелов пушек истребителя");
+        d("plane.cannon-range", 130, "Дальность пушек самолёта");
+        d("plane.gun-damage", 6.0, "Урон пулемёта бомбардировщика (ЛКМ)");
+        d("plane.gun-interval-ticks", 3, "Интервал выстрелов пулемёта бомбардировщика");
+        d("plane.rocket-power", 3.5, "Мощность ракеты истребителя (ПКМ)");
+        d("plane.rocket-interval-ticks", 40, "Перезарядка ракет истребителя");
+        d("plane.bomb-power", 5.0, "Мощность бомбы бомбардировщика (ПКМ)");
+        d("plane.bomb-interval-ticks", 16, "Интервал сброса бомб");
+        d("country.airfields", 2, "Сколько аэродромов со стоянкой самолётов строить в стране");
         d("heli.gun-damage", 8.0, "Урон пулемёта вертолёта (ЛКМ)");
         d("heli.gun-interval-ticks", 2, "Интервал выстрелов пулемёта вертолёта");
         d("heli.gun-range", 100, "Дальность пулемёта вертолёта");
@@ -505,11 +585,15 @@ public final class Raider extends JavaPlugin implements Listener {
         POST = new NamespacedKey(this, "post");
         HELI = new NamespacedKey(this, "heli");
         PROPK = new NamespacedKey(this, "propk");
+        HBASE = new NamespacedKey(this, "hbase");
+        SHIPK = new NamespacedKey(this, "shipk");
+        CBALL = new NamespacedKey(this, "cball");
         loadDefaults();
         initTeam();
         getDataFolder().mkdirs();
         dataFile = new File(getDataFolder(), "data.yml");
         load();
+        rebuildShield();
         Bukkit.getPluginManager().registerEvents(this, this);
         for (World w : Bukkit.getWorlds()) for (Entity en : w.getEntities()) rescan(en);
         Bukkit.getScheduler().runTaskTimer(this, this::secondTick, 20L, 20L);
@@ -528,6 +612,7 @@ public final class Raider extends JavaPlugin implements Listener {
         for (Turret t : turrets.values()) for (BlockDisplay part : t.parts) part.remove();
         for (Prop pr : props.values()) for (Entity en : pr.parts) en.remove();
         for (Heli h : helis.values()) for (BlockDisplay d : h.parts) d.remove();
+        for (Ship sh : ships) { for (BlockDisplay d : sh.parts) d.remove(); for (Interaction i : sh.ints) i.remove(); }
         for (Missile m : missiles) for (BlockDisplay d : m.parts) d.remove();
         for (UUID id : new ArrayList<>(heldModels.keySet())) removeHeld(id);
         for (UUID id : new ArrayList<>(scoped)) { Player sp = Bukkit.getPlayer(id); if (sp != null) unscope(sp); }
@@ -579,6 +664,22 @@ public final class Raider extends JavaPlugin implements Listener {
             sl.add(m);
         }
         y.set("settlements", sl);
+        List<Map<String, Object>> al = new ArrayList<>();
+        for (Airfield a : airfields) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("world", a.world); m.put("x", a.x); m.put("y", a.y); m.put("z", a.z); m.put("ns", a.ns);
+            al.add(m);
+        }
+        y.set("airfields", al);
+        List<Map<String, Object>> shl = new ArrayList<>();
+        for (Ship sh : ships) {
+            if (sh.sinking) continue;
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", sh.id); m.put("world", sh.world); m.put("x", sh.x); m.put("y", sh.y); m.put("z", sh.z); m.put("dir", sh.dir);
+            m.put("hp", sh.hp); m.put("water", sh.water); m.put("enemy", sh.enemy); m.put("owner", sh.owner); m.put("holes", new ArrayList<>(sh.holes));
+            shl.add(m);
+        }
+        y.set("ships", shl);
         y.set("country-name", countryName);
         y.set("country-defeated", countryDefeated);
         try { y.save(dataFile); } catch (Exception ex) { getLogger().warning("Не удалось сохранить: " + ex.getMessage()); }
@@ -626,6 +727,27 @@ public final class Raider extends JavaPlugin implements Listener {
                 s.captured = (Boolean) m.get("captured"); s.built = (Boolean) m.get("built");
                 s.fx = ((Number) m.get("fx")).intValue(); s.fy = ((Number) m.get("fy")).intValue(); s.fz = ((Number) m.get("fz")).intValue();
                 settlements.add(s);
+            } catch (Exception ignored) { }
+        }
+        for (Map<?, ?> m : y.getMapList("airfields")) {
+            try {
+                Airfield a = new Airfield();
+                a.world = (String) m.get("world");
+                a.x = ((Number) m.get("x")).intValue(); a.y = ((Number) m.get("y")).intValue(); a.z = ((Number) m.get("z")).intValue();
+                a.ns = (Boolean) m.get("ns");
+                airfields.add(a);
+            } catch (Exception ignored) { }
+        }
+        for (Map<?, ?> m : y.getMapList("ships")) {
+            try {
+                Ship sh = new Ship();
+                sh.id = (String) m.get("id"); sh.world = (String) m.get("world");
+                sh.x = ((Number) m.get("x")).intValue(); sh.y = ((Number) m.get("y")).intValue(); sh.z = ((Number) m.get("z")).intValue();
+                sh.dir = ((Number) m.get("dir")).intValue();
+                sh.hp = ((Number) m.get("hp")).doubleValue(); sh.water = ((Number) m.get("water")).doubleValue();
+                sh.enemy = (Boolean) m.get("enemy"); sh.owner = String.valueOf(m.get("owner"));
+                if (m.get("holes") instanceof List<?> hl) for (Object o : hl) if (o instanceof Number n) sh.holes.add(n.intValue());
+                ships.add(sh);
             } catch (Exception ignored) { }
         }
         countryName = y.getString("country-name");
@@ -813,7 +935,7 @@ public final class Raider extends JavaPlugin implements Listener {
         String av = en.getPersistentDataContainer().get(ALLY, PersistentDataType.STRING);
         if (av != null && !av.equals("garrison")) en.remove();
         if (en.getPersistentDataContainer().has(SID, PersistentDataType.STRING) && en instanceof Mob) soldiers.add(en.getUniqueId());
-        if (en.getPersistentDataContainer().has(HELI, PersistentDataType.STRING)) helis.putIfAbsent(en.getUniqueId(), new Heli());
+        if (en.getPersistentDataContainer().has(HELI, PersistentDataType.STRING)) { Heli nh = new Heli(); nh.kind = airKind(en); helis.putIfAbsent(en.getUniqueId(), nh); }
         if ((en instanceof BlockDisplay || en instanceof Interaction) && en.getPersistentDataContainer().has(MODEL, PersistentDataType.STRING)) en.remove();
     }
 
@@ -963,6 +1085,25 @@ public final class Raider extends JavaPlugin implements Listener {
                         List.of(ChatColor.RED + "ПКМ: на месте ближайшего маяка", ChatColor.RED + "появится огромная воронка.",
                                 ChatColor.RED + "Все враги погибнут. База тоже!"));
             case "gturret": return turretItem(n, 1, true);
+            case "armor_plate":
+                return mk(Material.NETHERITE_INGOT, n, id, ChatColor.DARK_GRAY + "Броне-пластина", null,
+                        List.of(ChatColor.GRAY + "ПКМ по стене: повесить пластину.", ChatColor.GRAY + "Взрыв не пробьёт защищённый блок.", ChatColor.GRAY + "Снять: Shift+ПКМ по пластине"));
+            case "grenade_smoke":
+                return mk(Material.SNOWBALL, n, id, ChatColor.GRAY + "Граната дымовая", "gray_dye",
+                        List.of(ChatColor.GRAY + "Брось: дымовая завеса.", ChatColor.GRAY + "Враги в дыму теряют ориентацию."));
+            case "ship":
+                return mk(Material.OAK_BOAT, n, id, ChatColor.GOLD + "Пиратский корабль", "oak_boat",
+                        List.of(ChatColor.GRAY + "ПКМ по воде: спустить корабль на воду (5×13)", ChatColor.GRAY + "ПКМ по штурвалу сзади: встать за руль",
+                                ChatColor.GRAY + "Курс = куда смотришь, Shift = стоп", ChatColor.GRAY + "ПКМ по пушке: выстрел, по помпе: откачать воду",
+                                ChatColor.GRAY + "ПКМ доской по пробоине: заделать"));
+ case "plane_f":
+                return mk(Material.ELYTRA, n, id, ChatColor.AQUA + "Истребитель", "elytra",
+                        List.of(ChatColor.GRAY + "ПКМ по земле: поставить самолёт", ChatColor.GRAY + "ПКМ по нему: сесть (2 места)",
+                                ChatColor.GRAY + "ЛКМ: пушки, ПКМ: ракета, Shift: выйти"));
+            case "plane_b":
+                return mk(Material.TNT_MINECART, n, id, ChatColor.DARK_GREEN + "Бомбардировщик", "tnt_minecart",
+                        List.of(ChatColor.GRAY + "ПКМ по земле: поставить самолёт", ChatColor.GRAY + "ПКМ по нему: сесть (2 места)",
+                                ChatColor.GRAY + "ЛКМ: пулемёт, ПКМ: сбросить бомбу, Shift: выйти"));
             case "hedgehog":
                 return mk(Material.IRON_BARS, n, id, ChatColor.GRAY + "Противотанковый ёж", null,
                         List.of(ChatColor.GRAY + "Ставь на землю. Танки не проедут!", ChatColor.GRAY + "Забрать: Shift+ПКМ по ежу"));
@@ -975,13 +1116,13 @@ public final class Raider extends JavaPlugin implements Listener {
                                 ChatColor.GRAY + "ЛКМ: пулемёт, ПКМ: ракета, Shift: выйти"));
             case "missile_s":
                 return mk(Material.BLAZE_ROD, n, id, ChatColor.YELLOW + "Ракета «Малая»", null,
-                        List.of(ChatColor.GRAY + "ПКМ: открыть карту и выбрать цель", ChatColor.GRAY + "Тактический ракетный удар"), Enchantment.UNBREAKING, 1);
+                        List.of(ChatColor.GRAY + "ПКМ по земле: поставить на пусковую", ChatColor.GRAY + "ПКМ по ракете: карта и пуск"), Enchantment.UNBREAKING, 1);
             case "missile_m":
                 return mk(Material.BLAZE_ROD, n, id, ChatColor.GOLD + "Ракета «Кассетная»", null,
-                        List.of(ChatColor.GRAY + "ПКМ: открыть карту и выбрать цель", ChatColor.GRAY + "Шесть боеголовок по площади"), Enchantment.UNBREAKING, 1);
+                        List.of(ChatColor.GRAY + "ПКМ по земле: поставить на пусковую", ChatColor.GRAY + "ПКМ по ракете: карта и пуск", ChatColor.GRAY + "Шесть боеголовок по площади"), Enchantment.UNBREAKING, 1);
             case "missile_l":
                 return mk(Material.BLAZE_ROD, n, id, ChatColor.DARK_RED + "Ракета «Сатана»", null,
-                        List.of(ChatColor.GRAY + "ПКМ: открыть карту и выбрать цель", ChatColor.RED + "Термобарическая. Огромная воронка."), Enchantment.UNBREAKING, 3);
+                        List.of(ChatColor.GRAY + "ПКМ по земле: поставить на пусковую", ChatColor.GRAY + "ПКМ по ракете: карта и пуск", ChatColor.RED + "Термобарическая. Огромная воронка."), Enchantment.UNBREAKING, 3);
             default: return null;
         }
     }
@@ -1154,6 +1295,7 @@ public final class Raider extends JavaPlugin implements Listener {
     // ===== Логика баз (раз в секунду) =====
     void secondTick() {
         boolean dirty = false;
+        pirateSpawnTick();
         for (Base b : new ArrayList<>(bases.values())) {
             World w = b.w();
             if (w == null || !w.isChunkLoaded(b.x >> 4, b.z >> 4)) continue;
@@ -1645,9 +1787,11 @@ public final class Raider extends JavaPlugin implements Listener {
 
             Stuck s = stuck.computeIfAbsent(id, key -> new Stuck());
             Player tp = nearest(e.getLocation(), 40);
+            if (tp != null && !smokes.isEmpty() && inSmoke(tp.getLocation())) tp = null;
             Location dest = (tp != null && !"negotiator".equals(role)) ? tp.getLocation() : bl;
 
             if (s.fly > 0) { fly(e, s, dest); continue; }
+            if (!smokes.isEmpty() && inSmoke(e.getLocation())) { smokeBehave(e, role); continue; }
             if (c % 10 == 0) stuckCheck(e, s, dest, role);
             if (c % 8 == 0) steer(e, role, bl, tp);
 
@@ -1703,6 +1847,8 @@ public final class Raider extends JavaPlugin implements Listener {
         enemyCache = ec;
         airCache = ac;
         groundCache = gc;
+        smokeTick();
+        shipTick();
         mineTick();
         soldierTick();
         heliTick();
@@ -1715,9 +1861,13 @@ public final class Raider extends JavaPlugin implements Listener {
         siren();
     }
 
-    void shootArrow(LivingEntity e, Player target, double speed, double damage, double spread) {
+    void shootArrow(LivingEntity e, LivingEntity target, double speed, double damage, double spread) {
+        Vector v = target.getEyeLocation().toVector().subtract(e.getEyeLocation().toVector());
+        shootDir(e, v, speed, damage, spread);
+    }
+
+    void shootDir(LivingEntity e, Vector v, double speed, double damage, double spread) {
         Location eye = e.getEyeLocation();
-        Vector v = target.getEyeLocation().toVector().subtract(eye.toVector());
         if (v.lengthSquared() == 0) return;
         v.normalize();
         if (spread > 0) v.add(new Vector(rnd.nextGaussian() * spread, rnd.nextGaussian() * spread, rnd.nextGaussian() * spread));
@@ -1727,6 +1877,77 @@ public final class Raider extends JavaPlugin implements Listener {
         a.setPickupStatus(AbstractArrow.PickupStatus.DISALLOWED);
         e.getWorld().playSound(eye, Sound.ENTITY_SKELETON_SHOOT, 0.6f, spread > 0 ? 1.6f : 0.8f);
         Bukkit.getScheduler().runTaskLater(this, () -> { if (a.isValid()) a.remove(); }, 60L);
+    }
+
+    // ===== Дымовые завесы =====
+    void addSmoke(Location l) {
+        Smoke sm = new Smoke();
+        sm.w = l.getWorld(); sm.x = l.getX(); sm.y = l.getY(); sm.z = l.getZ();
+        sm.r = cd("weapons.smoke-radius");
+        sm.until = now() + ci("weapons.smoke-seconds") * 20L;
+        smokes.add(sm);
+        sm.w.playSound(l, Sound.BLOCK_FIRE_EXTINGUISH, 2f, 0.6f);
+        sm.w.spawnParticle(Particle.LARGE_SMOKE, l, 80, sm.r * 0.4, 1.5, sm.r * 0.4, 0.02);
+    }
+
+    boolean inSmoke(Location l) {
+        for (Smoke sm : smokes) {
+            if (sm.w != l.getWorld()) continue;
+            double dx = l.getX() - sm.x, dy = l.getY() - sm.y, dz = l.getZ() - sm.z;
+            if (dx * dx + dz * dz <= sm.r * sm.r && Math.abs(dy) <= sm.r) return true;
+        }
+        return false;
+    }
+
+    void smokeTick() {
+        if (smokes.isEmpty()) return;
+        long t = now();
+        for (Iterator<Smoke> it = smokes.iterator(); it.hasNext(); ) {
+            Smoke sm = it.next();
+            if (t >= sm.until || sm.w == null) { it.remove(); continue; }
+            if (c % 3 != 0) continue;
+            for (int i = 0; i < 14; i++) {
+                double a = rnd.nextDouble() * Math.PI * 2, rr = Math.sqrt(rnd.nextDouble()) * sm.r;
+                Location p = new Location(sm.w, sm.x + Math.cos(a) * rr, sm.y + rnd.nextDouble() * Math.min(4, sm.r * 0.5), sm.z + Math.sin(a) * rr);
+                sm.w.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, p, 0, 0, 0.04, 0, 1.0);
+            }
+            sm.w.spawnParticle(Particle.LARGE_SMOKE, new Location(sm.w, sm.x, sm.y + 1, sm.z), 6, sm.r * 0.4, 1.0, sm.r * 0.4, 0.01);
+        }
+    }
+
+    /** Враг в дыму: миномёты молчат, одни палят по своим, другие стреляют вслепую, третьи блуждают. */
+    void smokeBehave(LivingEntity e, String role) {
+        if (e instanceof Mob m) m.setTarget(null);
+        if ("mortar".equals(role)) return;
+        int mode = Math.abs(e.getUniqueId().hashCode()) % 3;
+        if (c % 8 == 0 && e.isOnGround() && !isFlyer(e)) {
+            Vector v = new Vector(rnd.nextDouble() - 0.5, 0, rnd.nextDouble() - 0.5);
+            if (v.lengthSquared() > 0) e.setVelocity(v.normalize().multiply(0.25).setY(0.35));
+        }
+        if (c % 6 != 0) return;
+        boolean shooter = "gunner".equals(role) || "sniper".equals(role) || "tank".equals(role);
+        if (!shooter) return;
+        double dmg = "sniper".equals(role) ? cd("specials.sniper-damage") : cd("specials.gunner-damage");
+        if (mode == 1) {
+            LivingEntity other = null; double best = 400;
+            for (LivingEntity o : enemyCache) {
+                if (o == e || o.isDead() || !o.getWorld().equals(e.getWorld())) continue;
+                double dd = o.getLocation().distanceSquared(e.getLocation());
+                if (dd < best && dd > 4) { best = dd; other = o; }
+            }
+            if (other != null) {
+                if ("tank".equals(role)) {
+                    if (c % 24 == 0) {
+                        Vector v = other.getEyeLocation().toVector().subtract(e.getEyeLocation().toVector()).normalize();
+                        Fireball fb = e.launchProjectile(Fireball.class, v);
+                        fb.setYield(1.8f); fb.setIsIncendiary(false);
+                    }
+                } else shootArrow(e, other, 2.4, dmg, 0.08);
+            }
+        } else if (mode == 2) {
+            Vector v = new Vector(rnd.nextDouble() - 0.5, (rnd.nextDouble() - 0.4) * 0.3, rnd.nextDouble() - 0.5);
+            if (!"tank".equals(role)) shootDir(e, v, 2.4, dmg, 0.0);
+        }
     }
 
     void steer(LivingEntity e, String role, Location base, Player tp) {
@@ -2278,6 +2499,35 @@ public final class Raider extends JavaPlugin implements Listener {
     }
 
     // ===== Реквизит: противотанковые ежи и мины =====
+    Quaternionf faceRot(BlockFace f) {
+        return switch (f) {
+            case SOUTH -> new Quaternionf().rotateY((float) Math.PI);
+            case WEST -> new Quaternionf().rotateY((float) (Math.PI / 2));
+            case EAST -> new Quaternionf().rotateY((float) (-Math.PI / 2));
+            case UP -> new Quaternionf().rotateX((float) (Math.PI / 2));
+            case DOWN -> new Quaternionf().rotateX((float) (-Math.PI / 2));
+            default -> new Quaternionf();
+        };
+    }
+
+    void addRot(List<BlockDisplay> l, Location o, Material m, String tag, double lx, double ly, double lz,
+                double sx, double sy, double sz, Quaternionf q) {
+        Vector3f c = new Vector3f((float) lx, (float) ly, (float) lz);
+        q.transform(c);
+        l.add(bdc(o, m, tag, c.x, 0.5 + c.y, c.z, sx, sy, sz, new Quaternionf(q)));
+    }
+
+    void rebuildShield() {
+        shielded.clear();
+        for (Prop p : props.values()) {
+            if (!p.kind.startsWith("plate_")) continue;
+            try {
+                BlockFace opp = BlockFace.valueOf(p.kind.substring(6)).getOppositeFace();
+                shielded.add(p.world + ";" + (p.x + opp.getModX()) + ";" + (p.y + opp.getModY()) + ";" + (p.z + opp.getModZ()));
+            } catch (Exception ignored) { }
+        }
+    }
+
     BlockDisplay bdc(Location at, Material m, String tag, double cx, double cy, double cz,
                      double sx, double sy, double sz, Quaternionf rot) {
         Vector3f tmp = new Vector3f((float) sx / 2f, (float) sy / 2f, (float) sz / 2f);
@@ -2299,6 +2549,7 @@ public final class Raider extends JavaPlugin implements Listener {
         p.hp = kind.equals("hedgehog") ? ci("hedgehog.health") : 1;
         props.put(p.key(), p);
         buildProp(p);
+        rebuildShield();
         save();
     }
 
@@ -2321,6 +2572,35 @@ public final class Raider extends JavaPlugin implements Listener {
             l.add(bdc(o, Material.BLACK_CONCRETE, tag, 0, 1, 0, 0.34, 0.34, 0.34, null));
             l.add(bdc(o, Material.ORANGE_TERRACOTTA, tag, 0, 1, 0, 0.26, 0.26, 0.26, new Quaternionf().rotateY(0.7f)));
             wid = 1.4f; hei = 2.2f;
+        } else if (p.kind.startsWith("plate_")) {
+            Quaternionf q = faceRot(BlockFace.valueOf(p.kind.substring(6)));
+            addRot(l, o, Material.GRAY_CONCRETE, tag, 0, 0, 0.43, 0.98, 0.98, 0.14, q);
+            addRot(l, o, Material.BLACK_CONCRETE, tag, 0, 0.46, 0.42, 1.0, 0.08, 0.18, q);
+            addRot(l, o, Material.BLACK_CONCRETE, tag, 0, -0.46, 0.42, 1.0, 0.08, 0.18, q);
+            addRot(l, o, Material.BLACK_CONCRETE, tag, 0.46, 0, 0.42, 0.08, 1.0, 0.18, q);
+            addRot(l, o, Material.BLACK_CONCRETE, tag, -0.46, 0, 0.42, 0.08, 1.0, 0.18, q);
+            for (int sx = -1; sx <= 1; sx += 2) for (int sy = -1; sy <= 1; sy += 2)
+                addRot(l, o, Material.IRON_BLOCK, tag, sx * 0.33, sy * 0.33, 0.44, 0.1, 0.1, 0.2, q);
+            addRot(l, o, Material.LIGHT_GRAY_CONCRETE, tag, 0, 0, 0.44, 0.5, 0.06, 0.16, q);
+            addRot(l, o, Material.LIGHT_GRAY_CONCRETE, tag, 0, 0, 0.44, 0.06, 0.5, 0.16, q);
+            wid = 1.0f; hei = 1.0f;
+        } else if (p.kind.startsWith("missile_")) {
+            int kk = missileKind(p.kind);
+            double th = new double[]{0.4, 0.55, 0.8}[kk], len = new double[]{2.0, 3.0, 4.5}[kk];
+            l.add(bd(o, Material.BLACK_CONCRETE, tag, -1.3, 0, -1.3, 2.6, 0.12, 2.6, null));
+            l.add(bd(o, Material.YELLOW_CONCRETE, tag, -1.3, 0.12, -1.3, 2.6, 0.02, 0.1, null));
+            l.add(bd(o, Material.YELLOW_CONCRETE, tag, -1.3, 0.12, 1.2, 2.6, 0.02, 0.1, null));
+            for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
+                l.add(bd(o, Material.GRAY_CONCRETE, tag, sx * 0.6 - 0.06, 0.12, sz * 0.6 - 0.06, 0.12, 1.1, 0.12, null));
+            l.add(bd(o, Material.WHITE_CONCRETE, tag, -th / 2, 0.5, -th / 2, th, len, th, null));
+            l.add(bd(o, Material.BLACK_CONCRETE, tag, -th * 0.52, 0.5 + len * 0.6, -th * 0.52, th * 1.04, 0.25, th * 1.04, null));
+            if (kk == 2) l.add(bd(o, Material.YELLOW_CONCRETE, tag, -th * 0.52, 0.5 + len * 0.3, -th * 0.52, th * 1.04, 0.3, th * 1.04, null));
+            l.add(bd(o, Material.RED_CONCRETE, tag, -th * 0.4, 0.5 + len, -th * 0.4, th * 0.8, th * 0.8, th * 0.8, null));
+            l.add(bd(o, Material.RED_CONCRETE, tag, -th * 0.2, 0.5 + len + th * 0.8, -th * 0.2, th * 0.4, th * 0.5, th * 0.4, null));
+            l.add(bd(o, Material.GRAY_CONCRETE, tag, -th * 0.3, 0.2, -th * 0.3, th * 0.6, 0.3, th * 0.6, null));
+            l.add(bd(o, Material.BLACK_CONCRETE, tag, -th * 1.2, 0.5, -0.03, th * 2.4, len * 0.22, 0.06, null));
+            l.add(bd(o, Material.BLACK_CONCRETE, tag, -0.03, 0.5, -th * 1.2, 0.06, len * 0.22, th * 2.4, null));
+            wid = 1.6f; hei = (float) (len + 0.9);
         } else {
             l.add(bdc(o, Material.GREEN_TERRACOTTA, tag, 0, 0.07, 0, 0.9, 0.14, 0.9, null));
             l.add(bdc(o, Material.BLACK_CONCRETE, tag, 0, 0.17, 0, 0.6, 0.06, 0.6, null));
@@ -2349,8 +2629,9 @@ public final class Raider extends JavaPlugin implements Listener {
                 w.getBlockAt(p.x, p.y, p.z).setType(Material.AIR, false);
                 w.getBlockAt(p.x, p.y + 1, p.z).setType(Material.AIR, false);
             }
-            if (drop) w.dropItemNaturally(new Location(w, p.x + 0.5, p.y + 0.5, p.z + 0.5), make(p.kind, 1));
+            if (drop) w.dropItemNaturally(new Location(w, p.x + 0.5, p.y + 0.5, p.z + 0.5), make(p.kind.startsWith("plate_") ? "armor_plate" : p.kind, 1));
         }
+        rebuildShield();
         save();
     }
 
@@ -2473,7 +2754,7 @@ public final class Raider extends JavaPlugin implements Listener {
 
     void ensureCountry(World w, Location around) {
         if (!cb("country.enabled") || generating || countryDefeated) return;
-        for (Settlement s : settlements) if (s.world.equals(w.getName())) return;
+        for (Settlement s : settlements) if (s.world.equals(w.getName())) { ensureAirfields(w, around); return; }
         generateCountry(w, around);
     }
 
@@ -2525,9 +2806,10 @@ public final class Raider extends JavaPlugin implements Listener {
             made.add(s);
             queueCity(s);
         }
+        if (!made.isEmpty()) makeAirfields(w, center);
         buildQueue.add(() -> generating = false);
         if (made.isEmpty()) { generating = false; return; }
-        say("Разведка донесла: за границей лежит " + countryName + ". Городов: " + made.size() + ". Список с координатами: /raider cities");
+        say("Разведка донесла: за границей лежит " + countryName + ". Городов: " + made.size() + ", аэродромов: " + airfields.size() + ". Список с координатами: /raider cities");
         save();
     }
 
@@ -2930,68 +3212,119 @@ public final class Raider extends JavaPlugin implements Listener {
             s.sendMessage((st.captured ? ChatColor.BLUE : ChatColor.RED) + "" + i++ + ". " + st.name + " — X " + st.x + " Y " + st.y + " Z " + st.z
                     + (st.captured ? " [наш]" : " [враг, солдат: " + soldiersLeft(st) + "]") + (st.built ? "" : " (строится)"));
         }
+        int k = 1;
+        for (Airfield a : airfields) s.sendMessage(ChatColor.AQUA + "Аэродром " + k++ + ": X " + a.x + " Y " + a.y + " Z " + a.z + " (самолёты стоят у ангара и на стоянке)");
     }
 
-    // ===== Карта целеуказания и баллистические ракеты =====
-    void openMap(Player p, String mid) {
+    // ===== Карта целеуказания и баллистические ракеты (ракета ставится на площадку) =====
+    void openMap(Player p, Prop pad) {
         Menu m = new Menu("map", null);
-        m.mis = mid;
-        m.mx = p.getLocation().getBlockX();
-        m.mz = p.getLocation().getBlockZ();
+        m.mis = pad.kind;
+        m.pk = pad.key();
+        m.mx = pad.x;
+        m.mz = pad.z;
         m.scale = Math.max(4, ci("missile.map-scale"));
-        Inventory inv = Bukkit.createInventory(m, 54, ChatColor.DARK_RED + "Карта целеуказания");
+        Inventory inv = Bukkit.createInventory(m, 54, ChatColor.DARK_RED + "Карта целей  (север сверху)");
         m.inv = inv;
         renderMap(inv, p, m);
         p.openInventory(inv);
     }
 
+    int missileKind(String id) { return id.equals("missile_s") ? 0 : id.equals("missile_m") ? 1 : 2; }
+
+    String compass(double dx, double dz) {
+        double ang = Math.toDegrees(Math.atan2(dx, -dz));
+        if (ang < 0) ang += 360;
+        String[] n = {"С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"};
+        return n[(int) Math.round(ang / 45.0) % 8] + " " + (int) ang + "°";
+    }
+
+    Material terrainIcon(Material t, String[] name) {
+        String n = t.name();
+        if (t == Material.WATER) { name[0] = ChatColor.AQUA + "Вода"; return Material.BLUE_CONCRETE; }
+        if (t == Material.LAVA) { name[0] = ChatColor.GOLD + "Лава"; return Material.ORANGE_CONCRETE; }
+        if (n.contains("ICE")) { name[0] = ChatColor.AQUA + "Лёд"; return Material.LIGHT_BLUE_CONCRETE; }
+        if (n.contains("SNOW")) { name[0] = ChatColor.WHITE + "Снег"; return Material.WHITE_CONCRETE; }
+        if (n.contains("SAND")) { name[0] = ChatColor.YELLOW + "Песок"; return Material.YELLOW_CONCRETE; }
+        if (n.contains("LEAVES") || n.contains("LOG")) { name[0] = ChatColor.DARK_GREEN + "Лес"; return Material.GREEN_CONCRETE; }
+        if (n.contains("GRASS") || n.contains("MOSS") || n.contains("PODZOL") || n.contains("MYCELIUM")) { name[0] = ChatColor.GREEN + "Равнина"; return Material.LIME_CONCRETE; }
+        if (n.contains("DIRT") || n.contains("MUD") || n.contains("CLAY")) { name[0] = ChatColor.GOLD + "Земля"; return Material.BROWN_CONCRETE; }
+        if (n.contains("TERRACOTTA")) { name[0] = ChatColor.GOLD + "Пустошь"; return Material.ORANGE_TERRACOTTA; }
+        if (n.contains("STONE") || n.contains("DEEPSLATE") || n.contains("ANDESITE") || n.contains("DIORITE") || n.contains("GRANITE")
+                || n.contains("TUFF") || n.contains("GRAVEL") || n.contains("CALCITE")) { name[0] = ChatColor.GRAY + "Горы"; return Material.GRAY_CONCRETE; }
+        name[0] = ChatColor.GREEN + "Местность";
+        return Material.LIME_CONCRETE;
+    }
+
     void renderMap(Inventory inv, Player p, Menu m) {
         fillGlass(inv);
         World w = p.getWorld();
+        Prop pad = props.get(m.pk);
         int half = m.scale / 2;
+        double px = pad != null ? pad.x + 0.5 : p.getLocation().getX(), pz = pad != null ? pad.z + 0.5 : p.getLocation().getZ();
+        Set<Integer> path = new HashSet<>();
+        if (m.has) {
+            double d = Math.hypot(m.tx - px, m.tz - pz);
+            int steps = (int) Math.ceil(d / Math.max(1.0, m.scale * 0.35));
+            for (int k = 0; k <= steps; k++) {
+                double f = steps == 0 ? 0 : k / (double) steps;
+                int col = (int) Math.round((px + (m.tx - px) * f - m.mx) / m.scale) + 4;
+                int row = (int) Math.round((pz + (m.tz - pz) * f - m.mz) / m.scale) + 2;
+                if (col >= 0 && col < 9 && row >= 0 && row < 5) path.add(row * 9 + col);
+            }
+        }
         Location pl = p.getLocation();
         for (int row = 0; row < 5; row++) for (int col = 0; col < 9; col++) {
             int x = m.mx + (col - 4) * m.scale, z = m.mz + (row - 2) * m.scale;
-            Material tm = Material.GRAY_STAINED_GLASS_PANE;
-            String nm = ChatColor.GRAY + "Не исследовано";
-            if (w.isChunkLoaded(x >> 4, z >> 4)) {
-                Material t = w.getHighestBlockAt(x, z).getType();
-                nm = ChatColor.GREEN + "Местность";
-                if (t == Material.WATER) { tm = Material.BLUE_STAINED_GLASS_PANE; nm = ChatColor.AQUA + "Вода"; }
-                else if (t == Material.LAVA) { tm = Material.ORANGE_STAINED_GLASS_PANE; nm = ChatColor.GOLD + "Лава"; }
-                else if (t.isItem() && !t.isAir()) tm = t;
-                else tm = Material.GRASS_BLOCK;
-            }
+            Material tm = Material.BLACK_STAINED_GLASS_PANE;
+            String[] nm = {ChatColor.DARK_GRAY + "Не исследовано"};
+            if (w.isChunkLoaded(x >> 4, z >> 4)) tm = terrainIcon(w.getHighestBlockAt(x, z).getType(), nm);
             List<String> lore = new ArrayList<>();
             lore.add(ChatColor.GRAY + "X " + x + "  Z " + z);
             boolean glow = false;
+            if (path.contains(row * 9 + col)) { tm = Material.YELLOW_STAINED_GLASS_PANE; nm[0] = ChatColor.YELLOW + "Траектория ▸"; }
             for (Base b : bases.values())
-                if (b.w() != null && b.w().equals(w) && Math.abs(b.x - x) <= half && Math.abs(b.z - z) <= half) { tm = Material.BEACON; nm = ChatColor.DARK_PURPLE + "Твоя база"; }
+                if (b.w() != null && b.w().equals(w) && Math.abs(b.x - x) <= half && Math.abs(b.z - z) <= half) { tm = Material.BEACON; nm[0] = ChatColor.DARK_PURPLE + "Твоя база"; }
             for (Settlement s : settlements)
                 if (s.w() != null && s.w().equals(w) && Math.abs(s.x - x) <= half && Math.abs(s.z - z) <= half) {
                     tm = s.captured ? Material.BLUE_BANNER : Material.RED_BANNER;
-                    nm = (s.captured ? ChatColor.BLUE : ChatColor.RED) + s.name;
+                    nm[0] = (s.captured ? ChatColor.BLUE : ChatColor.RED) + s.name;
                     lore.add(s.captured ? ChatColor.BLUE + "Наш город" : ChatColor.RED + "Вражеский город");
                 }
-            if (Math.abs(pl.getBlockX() - x) <= half && Math.abs(pl.getBlockZ() - z) <= half) { tm = Material.COMPASS; nm = ChatColor.YELLOW + "Ты здесь"; }
-            if (m.has && Math.abs(m.tx - x) <= half && Math.abs(m.tz - z) <= half) { tm = Material.TNT; nm = ChatColor.DARK_RED + "" + ChatColor.BOLD + "ЦЕЛЬ"; glow = true; }
+            for (Airfield af : airfields)
+                if (af.w() != null && af.w().equals(w) && Math.abs(af.x - x) <= Math.max(half, 18) && Math.abs(af.z - z) <= Math.max(half, 18)) {
+                    tm = Material.ELYTRA; nm[0] = ChatColor.AQUA + "Аэродром";
+                    lore.add(ChatColor.AQUA + "Взлётная полоса, самолёты");
+                }
+            if (Math.abs(pl.getBlockX() - x) <= half && Math.abs(pl.getBlockZ() - z) <= half) { tm = Material.COMPASS; nm[0] = ChatColor.AQUA + "Ты здесь"; }
+            if (Math.abs(px - x) <= half && Math.abs(pz - z) <= half) { tm = Material.FIREWORK_ROCKET; nm[0] = ChatColor.GOLD + "" + ChatColor.BOLD + "ПУСКОВАЯ"; glow = true; }
+            if (m.has && Math.abs(m.tx - x) <= half && Math.abs(m.tz - z) <= half) {
+                tm = Material.TNT; nm[0] = ChatColor.DARK_RED + "" + ChatColor.BOLD + "ЦЕЛЬ";
+                lore.add(ChatColor.RED + "Ракета упадёт сюда (разброс " + (int) mdbl(missileKind(m.mis), "scatter") + " бл.)");
+                glow = true;
+            }
             lore.add(ChatColor.YELLOW + "Клик: выбрать цель");
             lore.add(ChatColor.YELLOW + "Shift+клик: центрировать карту");
-            ItemStack it = icon(tm, nm, lore.toArray(new String[0]));
+            ItemStack it = icon(tm, nm[0], lore.toArray(new String[0]));
             if (glow) { ItemMeta im = it.getItemMeta(); im.setEnchantmentGlintOverride(true); it.setItemMeta(im); }
             inv.setItem(row * 9 + col, it);
         }
+        int kk = missileKind(m.mis);
+        double dist = m.has ? Math.hypot(m.tx - px, m.tz - pz) : 0;
         inv.setItem(45, icon(Material.SPYGLASS, ChatColor.YELLOW + "Отдалить", ChatColor.GRAY + "Клетка: " + m.scale + " блоков"));
         inv.setItem(46, icon(Material.ARROW, ChatColor.YELLOW + "◄ Запад"));
         inv.setItem(47, icon(Material.ARROW, ChatColor.YELLOW + "▲ Север"));
         inv.setItem(48, icon(Material.ARROW, ChatColor.YELLOW + "▼ Юг"));
-        inv.setItem(49, icon(Material.PAPER, ChatColor.GOLD + "Центр: X " + m.mx + " Z " + m.mz,
-                ChatColor.GRAY + "Клетка: " + m.scale + " блоков", m.has ? ChatColor.RED + "Цель: X " + m.tx + " Z " + m.tz : ChatColor.GRAY + "Цель не выбрана"));
+        inv.setItem(49, icon(Material.PAPER, ChatColor.GOLD + "Центр карты: X " + m.mx + " Z " + m.mz,
+                ChatColor.GRAY + "Клетка: " + m.scale + " блоков",
+                m.has ? ChatColor.RED + "Цель: X " + m.tx + " Z " + m.tz : ChatColor.GRAY + "Цель не выбрана",
+                m.has ? ChatColor.RED + "Курс: " + compass(m.tx - px, m.tz - pz) + ", " + (int) dist + " блоков" : "",
+                m.has ? ChatColor.RED + "Полёт: ~" + (int) (Math.max(80, dist / Math.max(0.5, mdbl(kk, "speed"))) / 20) + " с" : ""));
         inv.setItem(50, icon(Material.ARROW, ChatColor.YELLOW + "► Восток"));
         inv.setItem(51, icon(Material.SPYGLASS, ChatColor.YELLOW + "Приблизить", ChatColor.GRAY + "Точнее цель"));
-        inv.setItem(52, icon(Material.COMPASS, ChatColor.YELLOW + "К себе"));
-        inv.setItem(53, icon(Material.FIREWORK_ROCKET, ChatColor.RED + "" + ChatColor.BOLD + "ПУСК!",
-                m.has ? ChatColor.GRAY + "Дистанция: " + (int) Math.hypot(m.tx - pl.getX(), m.tz - pl.getZ()) + " блоков" : ChatColor.GRAY + "Сначала выбери цель"));
+        inv.setItem(52, icon(Material.FIREWORK_ROCKET, ChatColor.YELLOW + "К пусковой"));
+        inv.setItem(53, icon(Material.RED_CONCRETE, ChatColor.RED + "" + ChatColor.BOLD + "ПУСК!",
+                m.has ? ChatColor.GRAY + "Дистанция: " + (int) dist + " блоков" : ChatColor.GRAY + "Сначала выбери цель"));
     }
 
     void mapClick(Player p, Menu m, int slot, Inventory inv, boolean shift) {
@@ -3006,7 +3339,7 @@ public final class Raider extends JavaPlugin implements Listener {
             case 50 -> m.mx += m.scale * 4;
             case 47 -> m.mz -= m.scale * 2;
             case 48 -> m.mz += m.scale * 2;
-            case 52 -> { m.mx = p.getLocation().getBlockX(); m.mz = p.getLocation().getBlockZ(); }
+            case 52 -> { Prop pad = props.get(m.pk); if (pad != null) { m.mx = pad.x; m.mz = pad.z; } }
             case 53 -> { launchMissile(p, m); return; }
             default -> { }
         }
@@ -3020,28 +3353,26 @@ public final class Raider extends JavaPlugin implements Listener {
 
     void launchMissile(Player p, Menu m) {
         if (!m.has) { p.sendMessage(ChatColor.RED + "Выбери цель на карте."); return; }
-        PlayerInventory inv = p.getInventory();
-        int slot = -1;
-        for (int i = 0; i < 36; i++) if (m.mis.equals(itemId(inv.getItem(i)))) { slot = i; break; }
-        if (slot < 0) { p.sendMessage(ChatColor.RED + "Ракеты нет в инвентаре."); p.closeInventory(); return; }
-        World w = p.getWorld();
-        double dist = Math.hypot(m.tx - p.getLocation().getX(), m.tz - p.getLocation().getZ());
+        Prop pad = props.get(m.pk);
+        if (pad == null || !pad.kind.startsWith("missile_")) { p.sendMessage(ChatColor.RED + "Ракеты на площадке уже нет."); p.closeInventory(); return; }
+        World w = pad.w();
+        double dist = Math.hypot(m.tx - (pad.x + 0.5), m.tz - (pad.z + 0.5));
         if (dist < 20) { p.sendMessage(ChatColor.RED + "Цель слишком близко (минимум 20 блоков)."); return; }
         if (dist > ci("missile.range")) { p.sendMessage(ChatColor.RED + "Цель вне дальности (" + ci("missile.range") + ")."); return; }
         int ty = w.getHighestBlockYAt(m.tx, m.tz);
-        ItemStack st = inv.getItem(slot);
-        if (st.getAmount() <= 1) inv.setItem(slot, null); else { st.setAmount(st.getAmount() - 1); inv.setItem(slot, st); }
         Missile ms = new Missile();
         ms.w = w;
-        ms.from = p.getLocation().add(0, 1.5, 0);
+        ms.kind = missileKind(pad.kind);
+        double len = new double[]{2.0, 3.0, 4.5}[ms.kind];
+        ms.from = new Location(w, pad.x + 0.5, pad.y + 0.5 + len, pad.z + 0.5);
         ms.to = new Location(w, m.tx + 0.5, ty + 1, m.tz + 0.5);
-        ms.kind = m.mis.equals("missile_s") ? 0 : m.mis.equals("missile_m") ? 1 : 2;
         ms.speed = Math.max(0.5, mdbl(ms.kind, "speed"));
         ms.total = Math.max(80, dist / ms.speed);
         ms.owner = p.getUniqueId();
+        removeProp(pad, false);
         missiles.add(ms);
         p.closeInventory();
-        w.playSound(p.getLocation(), Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, SoundCategory.MASTER, 3f, 0.6f);
+        w.playSound(ms.from, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, SoundCategory.MASTER, 3f, 0.6f);
         Bukkit.broadcastMessage(ChatColor.DARK_RED + "" + ChatColor.BOLD + "🚀 ПУСК РАКЕТЫ! Цель: X " + m.tx + " Z " + m.tz + ". Время полёта ~" + (int) (ms.total / 20) + " с.");
         for (Player pl : w.getPlayers())
             if (Math.hypot(pl.getLocation().getX() - m.tx, pl.getLocation().getZ() - m.tz) < 150)
@@ -3138,6 +3469,758 @@ public final class Raider extends JavaPlugin implements Listener {
         for (Player pl : w.getPlayers()) pl.playSound(pl.getLocation(), Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.MASTER, 4f, 0.6f);
     }
 
+
+
+    // ===== Корабли =====
+    Ship shipById(String id) { for (Ship sh : ships) if (sh.id.equals(id)) return sh; return null; }
+
+    int dirOfYaw(float yaw) { return Math.floorMod(Math.round(yaw / 90f), 4); }
+    int dirOfVec(double dx, double dz) { return Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 3 : 1) : (dz > 0 ? 0 : 2); }
+
+    Location lp(Ship sh, double fz, double rx, double dy) {
+        int d = sh.dir;
+        return new Location(sh.w(), sh.x + 0.5 + fz * DIRX[d] - rx * DIRZ[d], sh.y + dy, sh.z + 0.5 + fz * DIRZ[d] + rx * DIRX[d]);
+    }
+
+    Vector fwdVec(Ship sh) { return new Vector(DIRX[sh.dir], 0, DIRZ[sh.dir]); }
+    Vector rightVec(Ship sh) { return new Vector(-DIRZ[sh.dir], 0, DIRX[sh.dir]); }
+
+    Block cellBlock(World w, int cx, int cz, int dir, int[] cell, int wy) {
+        int x = cx + cell[0] * DIRX[dir] - cell[1] * DIRZ[dir];
+        int z = cz + cell[0] * DIRZ[dir] + cell[1] * DIRX[dir];
+        return w.getBlockAt(x, wy + cell[2], z);
+    }
+
+    boolean shipFits(Ship sh, int ncx, int ncz, int ndir, boolean fresh) {
+        World w = sh.w();
+        if (w == null) return false;
+        Set<String> old = new HashSet<>();
+        if (!fresh) for (int[] cell : SHIP_CELLS) old.add(keyOf(cellBlock(w, sh.x, sh.z, sh.dir, cell, sh.y)));
+        for (int[] cell : SHIP_CELLS) {
+            Block b = cellBlock(w, ncx, ncz, ndir, cell, sh.y);
+            if (old.contains(keyOf(b))) continue;
+            if (cell[2] == 0 ? b.getType() != Material.WATER : !b.getType().isAir()) return false;
+        }
+        for (int fz = -5; fz <= 5; fz += 5)
+            if (w.getBlockAt(ncx + fz * DIRX[ndir], sh.y - 1, ncz + fz * DIRZ[ndir]).getType() != Material.WATER) return false;
+        return true;
+    }
+
+    void shipFill(Ship sh) {
+        World w = sh.w();
+        for (int[] cell : SHIP_CELLS) cellBlock(w, sh.x, sh.z, sh.dir, cell, sh.y).setType(Material.BARRIER, false);
+    }
+
+    void shipClear(Ship sh) {
+        World w = sh.w();
+        for (int[] cell : SHIP_CELLS) cellBlock(w, sh.x, sh.z, sh.dir, cell, sh.y).setType(cell[2] == 0 ? Material.WATER : Material.AIR, false);
+    }
+
+    List<LivingEntity> ridersOf(Ship sh) {
+        List<LivingEntity> r = new ArrayList<>();
+        World w = sh.w();
+        if (w == null) return r;
+        Location c = lp(sh, 0, 0, 1);
+        for (Entity en : w.getNearbyEntities(c, 9, 6, 9)) {
+            if (!(en instanceof LivingEntity le) || en instanceof ArmorStand) continue;
+            double dx = en.getLocation().getX() - (sh.x + 0.5), dz = en.getLocation().getZ() - (sh.z + 0.5);
+            double fz = dx * DIRX[sh.dir] + dz * DIRZ[sh.dir], rx = -dx * DIRZ[sh.dir] + dz * DIRX[sh.dir];
+            double dy = en.getLocation().getY() - sh.y;
+            if (Math.abs(fz) <= 6.7 && Math.abs(rx) <= 2.7 && dy >= -0.6 && dy <= 4) r.add(le);
+        }
+        return r;
+    }
+
+    void moveShip(Ship sh, int ncx, int ncz, int ndir) {
+        World w = sh.w();
+        List<LivingEntity> riders = ridersOf(sh);
+        List<double[]> loc = new ArrayList<>();
+        for (LivingEntity le : riders) {
+            double dx = le.getLocation().getX() - (sh.x + 0.5), dz = le.getLocation().getZ() - (sh.z + 0.5);
+            loc.add(new double[]{dx * DIRX[sh.dir] + dz * DIRZ[sh.dir], -dx * DIRZ[sh.dir] + dz * DIRX[sh.dir], le.getLocation().getY() - sh.y});
+        }
+        int od = sh.dir;
+        shipClear(sh);
+        sh.x = ncx; sh.z = ncz; sh.dir = ndir;
+        shipFill(sh);
+        for (int i = 0; i < riders.size(); i++) {
+            LivingEntity le = riders.get(i);
+            double[] q = loc.get(i);
+            Location nl = lp(sh, q[0], q[1], q[2]);
+            nl.setYaw(le.getLocation().getYaw() + (ndir - od) * 90f * (Math.abs(ndir - od) == 3 ? -1f / 3f : 1f));
+            nl.setPitch(le.getLocation().getPitch());
+            le.teleport(nl);
+        }
+        placeParts(sh);
+    }
+
+    void clearShipEntities(Ship sh) {
+        for (BlockDisplay d : sh.parts) d.remove();
+        for (Interaction i : sh.ints) i.remove();
+        sh.parts.clear(); sh.ints.clear(); sh.specs.clear();
+    }
+
+    void placeParts(Ship sh) {
+        Location c = lp(sh, 0, 0, sh.dip);
+        c.setYaw(sh.dir * 90f);
+        for (BlockDisplay d : sh.parts) if (d.isValid()) d.teleport(c);
+        for (int i = 0; i < sh.ints.size(); i++) {
+            Interaction ia = sh.ints.get(i);
+            double[] sp = sh.specs.get(i);
+            if (ia.isValid()) ia.teleport(lp(sh, sp[0], sp[1], sp[2]));
+        }
+    }
+
+    Interaction shipInt(Ship sh, String role, double fz, double rx, double dy, float wid, float hei) {
+        Location o = lp(sh, fz, rx, dy);
+        Interaction ia = (Interaction) sh.w().spawnEntity(o, EntityType.INTERACTION);
+        ia.setInteractionWidth(wid);
+        ia.setInteractionHeight(hei);
+        ia.setPersistent(false);
+        ia.getPersistentDataContainer().set(MODEL, PersistentDataType.STRING, "ship:" + sh.id);
+        ia.getPersistentDataContainer().set(SHIPK, PersistentDataType.STRING, sh.id + "|" + role);
+        sh.ints.add(ia);
+        sh.specs.add(new double[]{fz, rx, dy});
+        return ia;
+    }
+
+    void buildShip(Ship sh) {
+        World w = sh.w();
+        if (w == null) return;
+        clearShipEntities(sh);
+        Location at = lp(sh, 0, 0, sh.dip);
+        at.setYaw(sh.dir * 90f);
+        String tag = "ship:" + sh.id;
+        List<BlockDisplay> l = sh.parts;
+        Material sail = sh.enemy ? Material.BLACK_WOOL : Material.WHITE_WOOL;
+        Material flag = sh.enemy ? Material.BLACK_WOOL : Material.CYAN_WOOL;
+        l.add(bd(at, Material.SPRUCE_PLANKS, tag, -2.5, 0.9, -6.5, 5, 0.1, 13, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -2.3, -1.3, -6.0, 4.6, 2.2, 12.0, null));
+        l.add(bd(at, Material.DARK_OAK_LOG, tag, -0.5, -1.7, -6.0, 1.0, 0.4, 12.0, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -1.6, -1.1, 6.0, 3.2, 2.0, 0.8, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -0.9, -0.7, 6.8, 1.8, 1.6, 0.7, null));
+        l.add(bd(at, Material.OAK_LOG, tag, -0.15, 0.9, 7.4, 0.3, 0.3, 2.0, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -2.5, 1.0, -6.5, 0.2, 0.9, 5.0, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -2.5, 1.0, 1.5, 0.2, 0.9, 5.0, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, 2.3, 1.0, -6.5, 0.2, 0.9, 5.0, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, 2.3, 1.0, 1.5, 0.2, 0.9, 5.0, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -2.5, 1.0, 6.3, 5, 0.9, 0.2, null));
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -2.5, 1.0, -6.5, 5, 0.9, 0.2, null));
+        l.add(bd(at, Material.OAK_LOG, tag, -0.2, 0.9, 1.8, 0.4, 6.4, 0.4, null));
+        l.add(bd(at, Material.OAK_LOG, tag, -2.6, 5.4, 1.9, 5.2, 0.2, 0.2, null));
+        l.add(bd(at, sail, tag, -2.4, 2.4, 2.3, 4.8, 3.0, 0.1, null));
+        l.add(bd(at, sail, tag, -1.6, 1.9, 4.0, 3.2, 0.1, 0.1, null));
+        l.add(bd(at, flag, tag, -0.05, 6.7, 0.9, 0.1, 0.6, 0.9, null));
+        if (sh.enemy) l.add(bd(at, Material.WHITE_CONCRETE, tag, -0.08, 6.85, 1.1, 0.16, 0.2, 0.2, null));
+        l.add(bd(at, Material.SEA_LANTERN, tag, -2.4, 1.9, -6.4, 0.2, 0.3, 0.2, null));
+        l.add(bd(at, Material.SEA_LANTERN, tag, 2.2, 1.9, -6.4, 0.2, 0.3, 0.2, null));
+        // штурвал
+        l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -0.2, 1.0, -5.3, 0.4, 0.8, 0.4, null));
+        l.add(bd(at, Material.SPRUCE_PLANKS, tag, -0.55, 1.5, -5.5, 1.1, 1.1, 0.12, null));
+        l.add(bd(at, Material.OAK_LOG, tag, -0.12, 1.9, -5.6, 0.24, 0.24, 0.3, null));
+        // помпа
+        l.add(bd(at, Material.IRON_BLOCK, tag, -1.4, 1.0, -3.2, 0.4, 0.7, 0.4, null));
+        l.add(bd(at, Material.LEVER, tag, -1.4, 1.6, -3.2, 0.4, 0.5, 0.4, null));
+        // пушки
+        for (int i = 0; i < 5; i++) {
+            int fz = CFZ[i], sd = CSD[i];
+            double lx = -sd;
+            if (sd == 0) {
+                l.add(bd(at, Material.DARK_OAK_PLANKS, tag, -0.35, 1.0, fz - 0.5, 0.7, 0.35, 1.0, null));
+                l.add(bd(at, Material.BLACK_CONCRETE, tag, -0.15, 1.35, fz, 0.3, 0.3, 1.1, null));
+            } else {
+                l.add(bd(at, Material.DARK_OAK_PLANKS, tag, lx - 0.35, 1.0, fz - 0.5, 0.7, 0.35, 1.0, null));
+                l.add(bd(at, Material.BLACK_CONCRETE, tag, sd > 0 ? lx - 1.1 : lx, 1.35, fz - 0.15, 1.1, 0.3, 0.3, null));
+            }
+        }
+        // пробоины
+        for (int slot : sh.holes) {
+            int sd = slot % 2 == 1 ? 1 : -1;
+            l.add(bd(at, Material.BLUE_STAINED_GLASS, tag, -sd - 0.4, 1.0, HFZ[slot / 2] - 0.4, 0.8, 0.05, 0.8, null));
+            l.add(bd(at, Material.COBWEB, tag, -sd - 0.3, 1.0, HFZ[slot / 2] - 0.3, 0.6, 0.1, 0.6, null));
+        }
+        for (BlockDisplay d : l) { d.setTeleportDuration(Math.min(59, Math.max(2, ci("ship.step-ticks")))); d.setViewRange(8f); }
+        shipInt(sh, "wheel", -5, 0, 1.0, 0.9f, 1.4f);
+        shipInt(sh, "pump", -3, 1.2, 1.0, 0.8f, 1.2f);
+        for (int i = 0; i < 5; i++) shipInt(sh, "c" + i, CFZ[i], CSD[i], 1.0, 0.9f, 0.9f);
+        for (int slot : sh.holes) shipInt(sh, "h" + slot, HFZ[slot / 2], slot % 2 == 1 ? 1 : -1, 1.0, 0.9f, 0.5f);
+    }
+
+    void placeShip(Player p) {
+        Location eye = p.getEyeLocation();
+        RayTraceResult rr = p.getWorld().rayTraceBlocks(eye, eye.getDirection(), 8, FluidCollisionMode.ALWAYS, true);
+        if (rr == null || rr.getHitBlock() == null || rr.getHitBlock().getType() != Material.WATER) {
+            p.sendMessage(ChatColor.RED + "Целься в воду: нужна гладь 5×13 блоков и глубина.");
+            return;
+        }
+        Block b = rr.getHitBlock();
+        while (b.getRelative(BlockFace.UP).getType() == Material.WATER) b = b.getRelative(BlockFace.UP);
+        Ship sh = new Ship();
+        sh.id = UUID.randomUUID().toString().substring(0, 8);
+        sh.world = b.getWorld().getName(); sh.x = b.getX(); sh.y = b.getY(); sh.z = b.getZ();
+        sh.dir = dirOfYaw(p.getLocation().getYaw());
+        sh.hp = ci("ship.health");
+        sh.owner = p.getUniqueId().toString();
+        if (!shipFits(sh, sh.x, sh.z, sh.dir, true)) {
+            p.sendMessage(ChatColor.RED + "Здесь не хватает места: нужна ровная вода 5×13, над ней пусто и глубина от 2 блоков.");
+            return;
+        }
+        if (p.getGameMode() != GameMode.CREATIVE) {
+            ItemStack h = p.getInventory().getItemInMainHand();
+            h.setAmount(h.getAmount() - 1);
+        }
+        shipFill(sh);
+        ships.add(sh);
+        buildShip(sh);
+        save();
+        p.sendMessage(ChatColor.GOLD + "Корабль спущен на воду. Встань на палубу, ПКМ по штурвалу сзади — и рули взглядом.");
+    }
+
+    void spawnPirate(Location near) {
+        World w = near.getWorld();
+        for (int tries = 0; tries < 30; tries++) {
+            double a = rnd.nextDouble() * Math.PI * 2, d = 60 + rnd.nextDouble() * 30;
+            int x = (int) (near.getX() + Math.cos(a) * d), z = (int) (near.getZ() + Math.sin(a) * d);
+            if (!w.isChunkLoaded(x >> 4, z >> 4)) continue;
+            int y = w.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES);
+            if (w.getBlockAt(x, y, z).getType() != Material.WATER) continue;
+            Ship sh = new Ship();
+            sh.id = UUID.randomUUID().toString().substring(0, 8);
+            sh.world = w.getName(); sh.x = x; sh.y = y; sh.z = z;
+            sh.dir = rnd.nextInt(4);
+            sh.enemy = true;
+            sh.hp = ci("ship.pirate-health");
+            if (!shipFits(sh, x, z, sh.dir, true)) continue;
+            shipFill(sh);
+            ships.add(sh);
+            buildShip(sh);
+            save();
+            for (Player pl : w.getPlayers()) if (pl.getLocation().distanceSquared(near) < 150 * 150)
+                pl.sendMessage(ChatColor.DARK_RED + "☠ Пиратский корабль на горизонте! Координаты: X " + x + " Z " + z);
+            return;
+        }
+    }
+
+    void pirateSpawnTick() {
+        if (!cb("ship.pirates-enabled") || ships.isEmpty()) return;
+        if (++pirTimer < ci("ship.pirate-spawn-seconds")) return;
+        pirTimer = 0;
+        int enemies = 0;
+        Ship friendly = null;
+        for (Ship sh : ships) { if (sh.enemy) enemies++; else if (!sh.sinking && sh.w() != null) friendly = sh; }
+        if (friendly == null || enemies >= ci("ship.pirate-max")) return;
+        spawnPirate(lp(friendly, 0, 0, 0));
+    }
+
+    void shipClick(Player p, Ship sh, String role) {
+        if (role.equals("wheel")) {
+            if (sh.enemy) { p.sendMessage(ChatColor.RED + "Штурвал пиратов не поддаётся."); return; }
+            if (p.isSneaking() && p.getInventory().getItemInMainHand().getType() == Material.AIR && ridersOf(sh).stream().noneMatch(r -> r instanceof Player q && q != p)) {
+                removeShip(sh);
+                giveItem(p, make("ship", 1));
+                p.sendMessage(ChatColor.GRAY + "Корабль поднят.");
+                return;
+            }
+            if (p.getUniqueId().equals(sh.helm)) { sh.helm = null; p.sendMessage(ChatColor.GRAY + "Штурвал отпущен."); }
+            else { sh.helm = p.getUniqueId(); p.sendMessage(ChatColor.GOLD + "Ты за штурвалом: плывём куда смотришь. Shift — стоп, ПКМ по штурвалу — отпустить."); }
+        } else if (role.equals("pump")) {
+            if (sh.water <= 0) { p.sendMessage(ChatColor.GRAY + "В трюме сухо."); return; }
+            sh.water = Math.max(0, sh.water - cd("ship.pump-amount"));
+            p.getWorld().playSound(p.getLocation(), Sound.BLOCK_BUBBLE_COLUMN_UPWARD_INSIDE, 1f, 1.3f);
+            p.getWorld().spawnParticle(Particle.SPLASH, lp(sh, -3, 2.4, 1.2), 12, 0.2, 0.2, 0.2, 0.1);
+            p.sendMessage(ChatColor.AQUA + "Откачиваю... воды в трюме: " + (int) sh.water + "%");
+        } else if (role.startsWith("c")) {
+            int i = Integer.parseInt(role.substring(1));
+            fireCannon(sh, i, p, null);
+        } else if (role.startsWith("h")) {
+            int slot = Integer.parseInt(role.substring(1));
+            ItemStack hand = p.getInventory().getItemInMainHand();
+            if (!Tag.PLANKS.isTagged(hand.getType())) { p.sendMessage(ChatColor.RED + "Пробоину заделывают досками: возьми доски в руку и ПКМ."); return; }
+            if (p.getGameMode() != GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 1);
+            sh.holes.remove(Integer.valueOf(slot));
+            buildShip(sh);
+            p.getWorld().playSound(p.getLocation(), Sound.BLOCK_WOOD_PLACE, 1f, 0.9f);
+            p.sendMessage(ChatColor.GREEN + "Пробоина заделана. Пробоин: " + sh.holes.size());
+            save();
+        }
+    }
+
+    void fireCannon(Ship sh, int i, Player p, Vector aim) {
+        long t = now();
+        if (t - sh.cl[i] < ci("ship.cannon-interval-ticks")) return;
+        sh.cl[i] = t;
+        int sd = CSD[i];
+        Vector out = sd == 0 ? fwdVec(sh) : rightVec(sh).multiply(sd);
+        Location mz = sd == 0 ? lp(sh, CFZ[i] + 1.5, 0, 1.5) : lp(sh, CFZ[i], sd * 2.3, 1.5);
+        Vector dir;
+        if (aim != null) dir = aim.clone();
+        else {
+            dir = p.getEyeLocation().getDirection();
+            Vector hz = dir.clone().setY(0);
+            if (hz.lengthSquared() < 0.01 || hz.normalize().dot(out) < 0.15) dir = out.clone().multiply(0.95).setY(Math.max(-0.1, dir.getY()));
+        }
+        dir.normalize();
+        World w = mz.getWorld();
+        Fireball fb = w.spawn(mz, Fireball.class);
+        if (p != null) fb.setShooter(p);
+        fb.setDirection(dir);
+        fb.setVelocity(dir.clone().multiply(cd("ship.cannon-speed")));
+        fb.setYield((float) cd("ship.cannon-power"));
+        fb.setIsIncendiary(false);
+        fb.getPersistentDataContainer().set(CBALL, PersistentDataType.STRING, sh.id);
+        cballs.add(fb);
+        Bukkit.getScheduler().runTaskLater(this, () -> { if (fb.isValid()) fb.remove(); }, 140L);
+        w.playSound(mz, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.MASTER, 2f, 0.7f);
+        w.spawnParticle(Particle.LARGE_SMOKE, mz.clone().add(dir.clone().multiply(0.8)), 12, 0.2, 0.2, 0.2, 0.02);
+        w.spawnParticle(Particle.FLAME, mz.clone().add(dir.clone().multiply(0.8)), 8, 0.1, 0.1, 0.1, 0.03);
+    }
+
+    boolean shipHitAt(Location l, String src, int age) {
+        for (Ship sh : new ArrayList<>(ships)) {
+            if (sh.sinking || sh.w() == null || !sh.w().equals(l.getWorld())) continue;
+            if (sh.id.equals(src) && age < 14) continue;
+            double dx = l.getX() - (sh.x + 0.5), dz = l.getZ() - (sh.z + 0.5);
+            double fz = dx * DIRX[sh.dir] + dz * DIRZ[sh.dir], rx = -dx * DIRZ[sh.dir] + dz * DIRX[sh.dir];
+            double dy = l.getY() - sh.y;
+            if (Math.abs(fz) <= 7.2 && Math.abs(rx) <= 3.2 && dy >= -2.4 && dy <= 4.0) { damageShip(sh, l, fz, rx); return true; }
+        }
+        return false;
+    }
+
+    void damageShip(Ship sh, Location l, double fz, double rx) {
+        World w = l.getWorld();
+        sh.hp -= cd("ship.cannon-damage");
+        w.spawnParticle(Particle.EXPLOSION, l, 1);
+        w.spawnParticle(Particle.LARGE_SMOKE, l, 14, 0.4, 0.4, 0.4, 0.02);
+        w.spawnParticle(Particle.BLOCK, l, 25, 0.4, 0.4, 0.4, 0.1, Material.DARK_OAK_PLANKS.createBlockData());
+        w.playSound(l, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.MASTER, 2f, 1.0f);
+        for (Entity en : w.getNearbyEntities(l, 3, 3, 3))
+            if (en instanceof LivingEntity le && !(en instanceof ArmorStand)) le.damage(cd("ship.splash-damage"));
+        if (rnd.nextDouble() < 0.8 && sh.holes.size() < 10) {
+            int side = rx >= 0 ? 1 : 0;
+            int best = -1; double bd = 99;
+            for (int k = 0; k < HFZ.length; k++) {
+                int slot = k * 2 + side;
+                if (sh.holes.contains(slot)) continue;
+                double dd = Math.abs(HFZ[k] - fz);
+                if (dd < bd) { bd = dd; best = slot; }
+            }
+            if (best < 0) for (int slot = 0; slot < 10; slot++) if (!sh.holes.contains(slot)) { best = slot; break; }
+            if (best >= 0) {
+                sh.holes.add(best);
+                buildShip(sh);
+                for (Player pl : w.getPlayers()) if (pl.getLocation().distanceSquared(l) < 40 * 40)
+                    pl.sendMessage(ChatColor.RED + "Пробоина в корпусе! Заделай её доской.");
+            }
+        }
+        if (sh.hp <= 0) sinkShip(sh);
+        save();
+    }
+
+    void sinkShip(Ship sh) {
+        if (sh.sinking) return;
+        sh.sinking = true;
+        sh.sinkT = 0;
+        World w = sh.w();
+        shipClear(sh);
+        for (Interaction i : sh.ints) i.remove();
+        sh.ints.clear(); sh.specs.clear();
+        Location c = lp(sh, 0, 0, 1);
+        w.playSound(c, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.MASTER, 3f, 0.5f);
+        for (Player pl : w.getPlayers()) if (pl.getLocation().distanceSquared(c) < 120 * 120)
+            pl.sendMessage((sh.enemy ? ChatColor.GREEN + "Пиратский корабль потоплен!" : ChatColor.RED + "Корабль идёт ко дну!"));
+        if (sh.enemy) {
+            w.dropItemNaturally(c, new ItemStack(Material.DIRT, ci("ship.pirate-loot-dirt")));
+            w.dropItemNaturally(c, new ItemStack(Material.GUNPOWDER, 8));
+        }
+        save();
+    }
+
+    void removeShip(Ship sh) {
+        shipClear(sh);
+        clearShipEntities(sh);
+        ships.remove(sh);
+        save();
+    }
+
+    boolean turnToward(Ship sh, int want, long t) {
+        if (t - sh.lastStep < ci("ship.step-ticks")) return false;
+        int diff = Math.floorMod(want - sh.dir, 4);
+        if (diff == 0) return true;
+        int nd = diff == 3 ? (sh.dir + 3) % 4 : (sh.dir + 1) % 4;
+        sh.lastStep = t;
+        if (shipFits(sh, sh.x, sh.z, nd, false)) moveShip(sh, sh.x, sh.z, nd);
+        return false;
+    }
+
+    boolean sailForward(Ship sh, long t) {
+        if (t - sh.lastStep < ci("ship.step-ticks")) return false;
+        int nx = sh.x + DIRX[sh.dir], nz = sh.z + DIRZ[sh.dir];
+        sh.lastStep = t;
+        if (shipFits(sh, nx, nz, sh.dir, false)) { moveShip(sh, nx, nz, sh.dir); return true; }
+        return false;
+    }
+
+    void helmTick(Ship sh, long t) {
+        if (sh.helm == null) return;
+        Player p = Bukkit.getPlayer(sh.helm);
+        if (p == null || !p.isOnline() || !p.getWorld().equals(sh.w()) || lp(sh, -5, 0, 1).distance(p.getLocation()) > 7) { sh.helm = null; return; }
+        if (p.isSneaking()) return;
+        int want = dirOfYaw(p.getLocation().getYaw());
+        if (want != sh.dir) { turnToward(sh, want, t); return; }
+        if (t - sh.lastStep >= ci("ship.step-ticks") && !sailForward(sh, t) && t - sh.lastWarn > 40) {
+            sh.lastWarn = t;
+            p.sendMessage(ChatColor.RED + "Путь закрыт: мель или берег!");
+        }
+    }
+
+    void pirateAI(Ship sh, long t) {
+        World w = sh.w();
+        Location center = lp(sh, 0, 0, 1);
+        Player tp = null;
+        double best = 100 * 100;
+        for (Player p : w.getPlayers()) {
+            if (p.getGameMode() == GameMode.SPECTATOR) continue;
+            double d = p.getLocation().distanceSquared(center);
+            if (d < best) { best = d; tp = p; }
+        }
+        if (tp == null) return;
+        double dx = tp.getLocation().getX() - (sh.x + 0.5), dz = tp.getLocation().getZ() - (sh.z + 0.5);
+        double dist = Math.sqrt(best);
+        if (dist > ci("ship.pirate-range")) {
+            int want = dirOfVec(dx, dz);
+            if (want != sh.dir) { if (!turnToward(sh, want, t)) return; }
+            if (!sailForward(sh, t) && t - sh.lastStep == 0) {
+                int alt = Math.abs(dx) > Math.abs(dz) ? (dz >= 0 ? 0 : 2) : (dx >= 0 ? 3 : 1);
+                turnToward(sh, alt, t + 100);
+            }
+            return;
+        }
+        int perp = Math.abs(dx) > Math.abs(dz) ? (dz >= 0 ? 0 : 2) : (dx >= 0 ? 3 : 1);
+        if (sh.dir != perp) turnToward(sh, perp, t);
+        if (t - sh.lastFire < ci("ship.pirate-fire-ticks")) return;
+        boolean fired = false;
+        for (int i = 0; i < 5; i++) {
+            int sd = CSD[i];
+            Vector out = sd == 0 ? fwdVec(sh) : rightVec(sh).multiply(sd);
+            Location mz = sd == 0 ? lp(sh, CFZ[i] + 1.5, 0, 1.5) : lp(sh, CFZ[i], sd * 2.3, 1.5);
+            Vector to = tp.getEyeLocation().toVector().subtract(mz.toVector());
+            double dd = to.length();
+            Vector hz = to.clone().setY(0);
+            if (hz.lengthSquared() < 1 || hz.normalize().dot(out) < 0.8) continue;
+            to.setY(to.getY() + dd * 0.02);
+            to.add(new Vector(rnd.nextGaussian(), rnd.nextGaussian() * 0.5, rnd.nextGaussian()).multiply(dd * 0.03));
+            fireCannon(sh, i, null, to);
+            fired = true;
+        }
+        if (fired) sh.lastFire = t;
+    }
+
+    void shipTick() {
+        if (ships.isEmpty() && cballs.isEmpty()) return;
+        long t = now();
+        for (Iterator<Fireball> it = cballs.iterator(); it.hasNext(); ) {
+            Fireball fb = it.next();
+            if (!fb.isValid()) { it.remove(); continue; }
+            String src = fb.getPersistentDataContainer().get(CBALL, PersistentDataType.STRING);
+            Location l = fb.getLocation();
+            Location prev = l.clone().subtract(fb.getVelocity().multiply(0.5));
+            if (shipHitAt(l, src, fb.getTicksLived()) || shipHitAt(prev, src, fb.getTicksLived())) { fb.remove(); it.remove(); }
+        }
+        for (Ship sh : new ArrayList<>(ships)) {
+            World w = sh.w();
+            if (w == null || !w.isChunkLoaded(sh.x >> 4, sh.z >> 4)) continue;
+            if (sh.sinking) {
+                sh.dip -= 0.08;
+                sh.sinkT++;
+                for (BlockDisplay d : sh.parts) if (d.isValid()) {
+                    Location c = lp(sh, 0, 0, sh.dip);
+                    c.setYaw(sh.dir * 90f);
+                    d.teleport(c);
+                }
+                if (c % 4 == 0) w.spawnParticle(Particle.BUBBLE, lp(sh, 0, 0, sh.dip + 1), 25, 2, 0.5, 5, 0.05);
+                if (sh.sinkT > 45) { clearShipEntities(sh); ships.remove(sh); save(); }
+                continue;
+            }
+            if (sh.parts.isEmpty() || !sh.parts.get(0).isValid()) buildShip(sh);
+            if (!sh.holes.isEmpty()) {
+                sh.water += sh.holes.size() * cd("ship.leak-per-hole") * 0.1;
+                if (c % 6 == 0) for (int slot : sh.holes)
+                    w.spawnParticle(Particle.FALLING_WATER, lp(sh, HFZ[slot / 2], (slot % 2 == 1 ? 1 : -1) * 1.0, 1.2), 4, 0.2, 0.1, 0.2, 0);
+            }
+            if (sh.water >= 100) { sh.water = 100; sinkShip(sh); continue; }
+            double target = -sh.water / 100.0 * 1.3;
+            if (Math.abs(target - sh.dip) > 0.02) { sh.dip += (target - sh.dip) * 0.2; placeParts(sh); }
+            if (c % 10 == 0) {
+                String msg = ChatColor.GOLD + "Корпус " + (int) Math.max(0, sh.hp * 100 / (sh.enemy ? ci("ship.pirate-health") : ci("ship.health"))) + "%  "
+                        + ChatColor.AQUA + "Вода " + (int) sh.water + "%  " + ChatColor.RED + "Пробоин " + sh.holes.size();
+                for (LivingEntity le : ridersOf(sh))
+                    if (le instanceof Player pl) pl.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR, new net.md_5.bungee.api.chat.TextComponent(msg));
+            }
+            if (sh.enemy) pirateAI(sh, t); else helmTick(sh, t);
+        }
+    }
+
+    @EventHandler
+    public void onCannonball(ProjectileHitEvent e) {
+        String src = e.getEntity().getPersistentDataContainer().get(CBALL, PersistentDataType.STRING);
+        if (src == null) return;
+        Location l = e.getEntity().getLocation().add(e.getEntity().getVelocity().normalize().multiply(0.8));
+        if (shipHitAt(l, src, e.getEntity().getTicksLived()) || shipHitAt(e.getEntity().getLocation(), src, e.getEntity().getTicksLived())) {
+            e.getEntity().remove();
+            e.setCancelled(true);
+        }
+    }
+
+    // ===== Самолёты и аэродромы =====
+    String airKind(Entity en) {
+        String v = en.getPersistentDataContainer().get(HELI, PersistentDataType.STRING);
+        if (v == null) return "heli";
+        int i = v.indexOf(';');
+        return i < 0 ? "heli" : v.substring(i + 1);
+    }
+
+    LivingEntity spawnAir(Location at, String kind, String owner) {
+        EntityType type = null;
+        try { type = Registry.ENTITY_TYPE.get(NamespacedKey.minecraft("happy_ghast")); } catch (Throwable ignored) { }
+        Material hm = Material.matchMaterial("blue_harness");
+        if (type == null || hm == null) return null;
+        Entity en = at.getWorld().spawnEntity(at, type);
+        if (!(en instanceof LivingEntity le)) { en.remove(); return null; }
+        le.getEquipment().setItem(EquipmentSlot.BODY, new ItemStack(hm));
+        le.setInvisible(true);
+        le.setRemoveWhenFarAway(false);
+        le.setPersistent(true);
+        AttributeInstance sc = le.getAttribute(Attribute.SCALE);
+        if (sc != null) sc.setBaseValue(cd("heli.scale"));
+        setHealth(le, ci("plane.health"));
+        le.addPotionEffect(new PotionEffect(PotionEffectType.FIRE_RESISTANCE, PotionEffect.INFINITE_DURATION, 0, false, false));
+        le.setAI(false);
+        le.setCustomName(ChatColor.AQUA + (kind.equals("fighter") ? "Истребитель" : "Бомбардировщик"));
+        le.setCustomNameVisible(false);
+        le.getPersistentDataContainer().set(HELI, PersistentDataType.STRING, owner + ";" + kind);
+        Heli h = new Heli();
+        h.kind = kind;
+        helis.put(le.getUniqueId(), h);
+        return le;
+    }
+
+    void placePlane(Player p, Block clicked, BlockFace face, String kind) {
+        Location at = clicked.getRelative(face).getLocation().add(0.5, 0.1, 0.5);
+        at.setYaw(p.getLocation().getYaw());
+        LivingEntity le = spawnAir(at, kind, p.getUniqueId().toString());
+        if (le == null) { p.sendMessage(ChatColor.RED + "Эта версия сервера не поддерживает самолёты (нет счастливого гаста)."); return; }
+        if (p.getGameMode() != GameMode.CREATIVE) {
+            ItemStack h = p.getInventory().getItemInMainHand();
+            h.setAmount(h.getAmount() - 1);
+        }
+        p.sendMessage(ChatColor.AQUA + "Самолёт готов. ПКМ по нему: сесть (2 места). Shift: выйти.");
+    }
+
+    void planeFire(Player p, Entity hv, Heli h, boolean lmb) {
+        long t = now();
+        boolean bomber = h.kind.equals("bomber");
+        Location eye = p.getEyeLocation();
+        Vector dir = eye.getDirection().normalize();
+        if (lmb) {
+            if (t - h.lastGun < ci(bomber ? "plane.gun-interval-ticks" : "plane.cannon-interval-ticks")) return;
+            h.lastGun = t;
+            double dmg = bomber ? cd("plane.gun-damage") : cd("plane.cannon-damage");
+            int barrels = bomber ? 1 : 2;
+            for (int k = 0; k < barrels; k++) {
+                Vector d2 = dir.clone().add(new Vector(rnd.nextGaussian() * 0.008, rnd.nextGaussian() * 0.008, rnd.nextGaussian() * 0.008)).normalize();
+                hitscan(p, eye.clone().add(dir.clone().multiply(1.5)), d2, cd("plane.cannon-range"), dmg, hv);
+            }
+            p.getWorld().playSound(eye, Sound.ENTITY_BLAZE_SHOOT, 0.7f, 1.8f);
+        } else if (bomber) {
+            if (t - h.lastRocket < ci("plane.bomb-interval-ticks")) return;
+            h.lastRocket = t;
+            Location at = hv.getLocation().add(0, -1.6, 0);
+            Vector fw = hv.getLocation().getDirection().setY(0);
+            if (fw.lengthSquared() > 0) fw.normalize().multiply(0.35);
+            TNTPrimed tnt = at.getWorld().spawn(at, TNTPrimed.class);
+            tnt.setFuseTicks(70);
+            tnt.setYield((float) cd("plane.bomb-power"));
+            tnt.setSource(p);
+            tnt.setVelocity(fw.setY(-0.5));
+            p.getWorld().playSound(at, Sound.ENTITY_TNT_PRIMED, 1f, 0.7f);
+        } else {
+            if (t - h.lastRocket < ci("plane.rocket-interval-ticks")) return;
+            h.lastRocket = t;
+            Fireball fb = p.getWorld().spawn(eye.clone().add(dir.clone().multiply(3.0)), Fireball.class);
+            fb.setShooter(p);
+            fb.setDirection(dir);
+            fb.setVelocity(dir.clone().multiply(2.5));
+            fb.setYield((float) cd("plane.rocket-power"));
+            fb.setIsIncendiary(false);
+            fb.getPersistentDataContainer().set(AA, PersistentDataType.BYTE, (byte) 1);
+            Bukkit.getScheduler().runTaskLater(this, () -> { if (fb.isValid()) fb.remove(); }, 100L);
+            p.getWorld().playSound(eye, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, 1f, 0.7f);
+        }
+    }
+
+    void buildPlaneModel(Heli h, LivingEntity le) {
+        Location at = le.getLocation();
+        String tag = "heli:" + le.getUniqueId();
+        double yo = cd("heli.model-y");
+        List<BlockDisplay> l = h.parts;
+        if (h.kind.equals("fighter")) {
+            l.add(bd(at, Material.GRAY_CONCRETE, tag, -0.4, yo + 0.5, -3.0, 0.8, 0.7, 6.0, null));
+            l.add(bd(at, Material.LIGHT_GRAY_CONCRETE, tag, -0.27, yo + 0.58, 3.0, 0.54, 0.5, 1.3, null));
+            l.add(bd(at, Material.BLACK_CONCRETE, tag, -0.1, yo + 0.68, 4.3, 0.2, 0.2, 0.6, null));
+            l.add(bd(at, Material.LIGHT_BLUE_STAINED_GLASS, tag, -0.3, yo + 1.2, 0.2, 0.6, 0.4, 1.7, null));
+            l.add(bd(at, Material.GRAY_CONCRETE, tag, -3.3, yo + 0.65, -1.6, 6.6, 0.1, 2.0, null));
+            l.add(bd(at, Material.RED_CONCRETE, tag, -3.3, yo + 0.65, -1.6, 0.3, 0.12, 2.0, null));
+            l.add(bd(at, Material.RED_CONCRETE, tag, 3.0, yo + 0.65, -1.6, 0.3, 0.12, 2.0, null));
+            l.add(bd(at, Material.GRAY_CONCRETE, tag, -1.6, yo + 0.75, -3.3, 3.2, 0.08, 1.0, null));
+            l.add(bd(at, Material.RED_CONCRETE, tag, -0.05, yo + 1.2, -3.3, 0.1, 1.1, 1.1, null));
+            l.add(bd(at, Material.BLACK_CONCRETE, tag, -0.3, yo + 0.55, -3.5, 0.6, 0.5, 0.5, null));
+            l.add(bd(at, Material.ORANGE_CONCRETE, tag, -0.2, yo + 0.62, -3.75, 0.4, 0.35, 0.25, null));
+            l.add(bd(at, Material.BLACK_CONCRETE, tag, -1.3, yo + 0.5, 0.3, 0.12, 0.12, 1.5, null));
+            l.add(bd(at, Material.BLACK_CONCRETE, tag, 1.18, yo + 0.5, 0.3, 0.12, 0.12, 1.5, null));
+        } else {
+            l.add(bd(at, Material.LIGHT_GRAY_CONCRETE, tag, -0.75, yo + 0.4, -4.6, 1.5, 1.2, 9.0, null));
+            l.add(bd(at, Material.GREEN_CONCRETE, tag, -0.76, yo + 0.4, -4.6, 1.52, 0.3, 9.0, null));
+            l.add(bd(at, Material.LIGHT_BLUE_STAINED_GLASS, tag, -0.6, yo + 0.7, 4.4, 1.2, 0.9, 1.1, null));
+            l.add(bd(at, Material.LIGHT_BLUE_STAINED_GLASS, tag, -0.5, yo + 1.5, 2.2, 1.0, 0.5, 1.7, null));
+            l.add(bd(at, Material.GRAY_CONCRETE, tag, -7.2, yo + 0.75, -1.6, 14.4, 0.18, 2.9, null));
+            for (int sx = -1; sx <= 1; sx += 2) for (int k = 0; k < 2; k++) {
+                double ex = sx * (k == 0 ? 2.3 : 4.6) - 0.45;
+                l.add(bd(at, Material.BLACK_CONCRETE, tag, ex, yo + 0.5, -0.4, 0.9, 0.8, 2.0, null));
+                l.add(bd(at, Material.GRAY_CONCRETE, tag, ex - 0.35, yo + 0.35, 1.6, 1.6, 0.06, 0.06, null));
+                l.add(bd(at, Material.GRAY_CONCRETE, tag, ex + 0.42, yo + 0.0, 1.6, 0.06, 1.6, 0.06, null));
+            }
+            l.add(bd(at, Material.LIGHT_GRAY_CONCRETE, tag, -3.0, yo + 0.95, -5.4, 6.0, 0.12, 1.5, null));
+            l.add(bd(at, Material.GREEN_CONCRETE, tag, -0.1, yo + 1.1, -5.4, 0.2, 2.2, 1.5, null));
+            l.add(bd(at, Material.BLACK_CONCRETE, tag, -0.5, yo + 0.15, -2.0, 1.0, 0.3, 3.4, null));
+            l.add(bd(at, Material.BLACK_CONCRETE, tag, -0.3, yo + 1.6, -1.6, 0.6, 0.5, 0.6, null));
+            l.add(bd(at, Material.GRAY_CONCRETE, tag, -0.05, yo + 1.7, -1.0, 0.1, 0.1, 1.2, null));
+            l.add(bd(at, Material.RED_CONCRETE, tag, -7.2, yo + 0.75, -1.6, 0.4, 0.2, 2.9, null));
+            l.add(bd(at, Material.RED_CONCRETE, tag, 6.8, yo + 0.75, -1.6, 0.4, 0.2, 2.9, null));
+        }
+        for (BlockDisplay d : l) d.setViewRange(5f);
+    }
+
+    int[] apos(boolean ns, int cx, int cz, int i, int j) {
+        return ns ? new int[]{cx + j, cz + i} : new int[]{cx + i, cz + j};
+    }
+
+    void makeAirfields(World w, Location center) {
+        int n = ci("country.airfields");
+        for (int k = 0; k < n; k++) {
+            List<Settlement> ex = new ArrayList<>(settlements);
+            for (Airfield a : airfields) { Settlement d = new Settlement(); d.x = a.x; d.z = a.z; ex.add(d); }
+            int[] site = findSite(w, center, ex);
+            if (site == null) break;
+            Airfield af = new Airfield();
+            af.world = w.getName(); af.x = site[0]; af.y = site[1]; af.z = site[2];
+            af.ns = rnd.nextBoolean();
+            airfields.add(af);
+            queueAirfield(af);
+        }
+    }
+
+    void ensureAirfields(World w, Location around) {
+        if (generating || !cb("country.enabled") || ci("country.airfields") <= 0) return;
+        for (Airfield a : airfields) if (a.world.equals(w.getName())) return;
+        generating = true;
+        makeAirfields(w, around);
+        buildQueue.add(() -> generating = false);
+        save();
+    }
+
+    void queueAirfield(Airfield af) {
+        World w = af.w();
+        if (w == null) return;
+        final int cx = af.x, gy = af.y, cz = af.z;
+        final boolean ns = af.ns;
+        for (int i = -36; i <= 36; i++) {
+            final int fi = i;
+            buildQueue.add(() -> airRow(w, cx, gy, cz, ns, fi));
+        }
+        buildQueue.add(() -> airBuildings(w, cx, gy, cz, ns));
+        buildQueue.add(() -> airPlanes(w, cx, gy, cz, ns));
+    }
+
+    void airRow(World w, int cx, int gy, int cz, boolean ns, int i) {
+        for (int j = -10; j <= 24; j++) {
+            int[] p = apos(ns, cx, cz, i, j);
+            for (int y = gy + 12; y >= gy + 1; y--) {
+                Block b = w.getBlockAt(p[0], y, p[1]);
+                if (!b.getType().isAir()) b.setType(Material.AIR, false);
+            }
+            Material top;
+            if (j >= -4 && j <= 4) {
+                top = Material.BLACK_CONCRETE;
+                if (j == 0 && Math.floorMod(i, 8) < 4 && Math.abs(i) < 31) top = Material.WHITE_CONCRETE;
+                if (Math.abs(i) >= 33 && Math.abs(i) <= 34 && (j & 1) == 0) top = Material.WHITE_CONCRETE;
+            } else if (j == -5 || j == 5) {
+                top = Math.floorMod(i, 6) == 0 ? Material.SEA_LANTERN : Material.LIGHT_GRAY_CONCRETE;
+            } else if (j >= 6 && j <= 10 && i >= -30 && i <= 6) {
+                top = Material.GRAY_CONCRETE;
+            } else top = Material.GRASS_BLOCK;
+            w.getBlockAt(p[0], gy, p[1]).setType(top, false);
+            for (int y = gy - 1; y >= gy - 8; y--) {
+                Block b = w.getBlockAt(p[0], y, p[1]);
+                Material m = b.getType();
+                if (!m.isSolid() || m == Material.WATER || m == Material.LAVA) b.setType(Material.DIRT, false);
+            }
+        }
+    }
+
+    void airBuildings(World w, int cx, int gy, int cz, boolean ns) {
+        // ангар: вдоль полосы i -14..6, поперёк j 12..22, вход со стороны полосы (j=12)
+        for (int i = -14; i <= 6; i++) for (int j = 12; j <= 22; j++) {
+            int[] p = apos(ns, cx, cz, i, j);
+            put(w, p[0], gy, p[1], Material.GRAY_CONCRETE);
+            boolean wall = i == -14 || i == 6 || j == 22;
+            for (int y = 1; y <= 6; y++) {
+                if (wall) put(w, p[0], gy + y, p[1], y == 3 && (j == 22) && (i & 3) == 0 ? Material.LIGHT_BLUE_STAINED_GLASS : Material.GRAY_CONCRETE);
+            }
+            put(w, p[0], gy + 7, p[1], (i & 3) == 0 && (j & 3) == 0 ? Material.SEA_LANTERN : Material.LIGHT_GRAY_CONCRETE);
+        }
+        for (int y = 1; y <= 6; y++) for (int i = -14; i <= 6; i += 20) {
+            int[] p = apos(ns, cx, cz, i, 12);
+            put(w, p[0], gy + y, p[1], Material.IRON_BLOCK);
+        }
+        // диспетчерская башня
+        for (int y = 1; y <= 9; y++) for (int i = 10; i <= 12; i++) for (int j = 12; j <= 14; j++) {
+            int[] p = apos(ns, cx, cz, i, j);
+            boolean edge = i == 10 || i == 12 || j == 12 || j == 14;
+            put(w, p[0], gy + y, p[1], edge ? Material.GRAY_CONCRETE : Material.AIR);
+        }
+        for (int i = 9; i <= 13; i++) for (int j = 11; j <= 15; j++) {
+            int[] p = apos(ns, cx, cz, i, j);
+            put(w, p[0], gy + 10, p[1], Material.LIGHT_GRAY_CONCRETE);
+            boolean edge = i == 9 || i == 13 || j == 11 || j == 15;
+            for (int y = 11; y <= 12; y++) put(w, p[0], gy + y, p[1], edge ? Material.LIGHT_BLUE_STAINED_GLASS : Material.AIR);
+            put(w, p[0], gy + 13, p[1], Material.GRAY_CONCRETE);
+        }
+        int[] mast = apos(ns, cx, cz, 11, 13);
+        for (int y = 14; y <= 17; y++) put(w, mast[0], gy + y, mast[1], y == 17 ? Material.REDSTONE_LAMP : Material.IRON_BARS);
+        // топливные бочки у ангара
+        for (int k = 0; k < 4; k++) {
+            int[] p = apos(ns, cx, cz, -12 + k * 2, 10);
+            put(w, p[0], gy + 1, p[1], Material.RED_CONCRETE);
+        }
+    }
+
+    void airPlanes(World w, int cx, int gy, int cz, boolean ns) {
+        // истребители в ангаре, носом к полосе; бомбардировщик на стоянке носом вдоль полосы
+        float toRunway = ns ? 90f : 180f;   // -j
+        float alongPlus = ns ? 0f : -90f;   // +i
+        int[][] fp = {{-9, 17}, {-1, 17}};
+        for (int[] q : fp) {
+            int[] p = apos(ns, cx, cz, q[0], q[1]);
+            Location at = new Location(w, p[0] + 0.5, gy + 1.1, p[1] + 0.5, toRunway, 0f);
+            spawnAir(at, "fighter", "none");
+        }
+        int[] pb = apos(ns, cx, cz, -22, 8);
+        spawnAir(new Location(w, pb[0] + 0.5, gy + 1.1, pb[1] + 0.5, alongPlus, 0f), "bomber", "none");
+        int[] pf = apos(ns, cx, cz, -8, 8);
+        spawnAir(new Location(w, pf[0] + 0.5, gy + 1.1, pf[1] + 0.5, alongPlus, 0f), "fighter", "none");
+    }
+
     // ===== Вертолёт =====
     void placeHeli(Player p, Block clicked, BlockFace face) {
         EntityType type = null;
@@ -3173,6 +4256,7 @@ public final class Raider extends JavaPlugin implements Listener {
     void buildHeliModel(Heli h, LivingEntity le) {
         for (BlockDisplay d : h.parts) d.remove();
         h.parts.clear();
+        if (!h.kind.equals("heli")) { buildPlaneModel(h, le); return; }
         Location at = le.getLocation();
         String tag = "heli:" + le.getUniqueId();
         double yo = cd("heli.model-y");
@@ -3233,19 +4317,35 @@ public final class Raider extends JavaPlugin implements Listener {
             if (!(ent instanceof LivingEntity le)) continue;
             boolean occ = !le.getPassengers().isEmpty();
             le.setAI(occ);
+            applyHeliSpeed(le, h);
             if (h.parts.isEmpty() || !h.parts.get(0).isValid()) buildHeliModel(h, le);
             h.rot += occ ? 0.9 : 0.12;
             Location l = le.getLocation();
-            l.setPitch(0f);
+            if (h.kind.equals("heli")) l.setPitch(0f);
             for (BlockDisplay d : h.parts) if (d.isValid()) d.teleport(l);
+            if (h.rotorA == null || !h.kind.equals("heli")) continue;
             setRotor(h.rotorA, 0, yo + 2.98, 0, 6.0, 0.06, 0.3, new Quaternionf().rotateY((float) h.rot));
             setRotor(h.rotorB, 0, yo + 2.98, 0, 6.0, 0.06, 0.3, new Quaternionf().rotateY((float) h.rot + 1.5708f));
             setRotor(h.tail, 0.22, yo + 1.4, -4.5, 0.05, 1.0, 0.12, new Quaternionf().rotateX((float) h.rot * 1.7f));
         }
     }
 
+    void applyHeliSpeed(LivingEntity le, Heli h) {
+        double mul = Math.max(0.2, h.kind.equals("heli") ? cd("heli.speed-multiplier")
+                : cd("plane.speed-multiplier") * (h.kind.equals("bomber") ? cd("plane.bomber-speed-factor") : 1.0));
+        if (h.appliedMul == mul) return;
+        try {
+            AttributeInstance fa = le.getAttribute(Attribute.FLYING_SPEED);
+            if (fa != null) { if (h.baseFly < 0) h.baseFly = fa.getBaseValue(); fa.setBaseValue(h.baseFly * mul); }
+            AttributeInstance ma = le.getAttribute(Attribute.MOVEMENT_SPEED);
+            if (ma != null) { if (h.baseMove < 0) h.baseMove = ma.getBaseValue(); ma.setBaseValue(h.baseMove * mul); }
+        } catch (Throwable ignored) { }
+        h.appliedMul = mul;
+    }
+
     void heliFire(Player p, Entity hv, boolean gun) {
-        Heli h = helis.computeIfAbsent(hv.getUniqueId(), k -> new Heli());
+        Heli h = helis.computeIfAbsent(hv.getUniqueId(), k -> { Heli nh = new Heli(); nh.kind = airKind(hv); return nh; });
+        if (!h.kind.equals("heli")) { planeFire(p, hv, h, gun); return; }
         long t = now();
         Location eye = p.getEyeLocation();
         Vector dir = eye.getDirection().normalize();
@@ -3417,6 +4517,8 @@ public final class Raider extends JavaPlugin implements Listener {
         }
         for (Turret t : new ArrayList<>(turrets.values()))
             if (t.w() != null && t.w().equals(w) && t.top().distance(center) <= radius) removeTurret(t);
+        for (Prop pr : new ArrayList<>(props.values()))
+            if (pr.w() != null && pr.w().equals(w) && new Location(w, pr.x, pr.y, pr.z).distance(center) <= radius) removeProp(pr, false);
         dropBase(b);
         save();
         for (int i = 0; i < 6; i++) {
@@ -3573,6 +4675,7 @@ public final class Raider extends JavaPlugin implements Listener {
 
     void explodeGrenade(Location l, String type, Entity src) {
         World w = l.getWorld();
+        if (type.equals("smoke")) { addSmoke(l); return; }
         if (type.equals("fire")) {
             w.createExplosion(l, (float) cd("weapons.grenade-fire-power"), true, false, src);
             w.spawnParticle(Particle.FLAME, l, 40, 1.2, 0.5, 1.2, 0.05);
@@ -3780,13 +4883,42 @@ public final class Raider extends JavaPlugin implements Listener {
                 case "sniper" -> { e.setCancelled(true); if (!scoped.contains(p.getUniqueId())) scope(p); else shoot(p, id); return; }
                 case "radio" -> { e.setCancelled(true); callAllies(p); return; }
                 case "nuke" -> { e.setCancelled(true); startNuke(p); return; }
-                case "missile_s", "missile_m", "missile_l" -> { e.setCancelled(true); openMap(p, id); return; }
+                case "missile_s", "missile_m", "missile_l" -> {
+                    e.setCancelled(true);
+                    if (act == Action.RIGHT_CLICK_BLOCK && e.getClickedBlock() != null && e.getBlockFace() == BlockFace.UP) {
+                        Block cell = e.getClickedBlock().getRelative(BlockFace.UP);
+                        if (cell.getType().isAir() && cell.getRelative(BlockFace.UP).getType().isAir() && cell.getRelative(BlockFace.DOWN).getType().isSolid()) {
+                            placeProp(id, cell);
+                            if (p.getGameMode() != GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 1);
+                            p.sendMessage(ChatColor.GOLD + "Ракета на пусковой. ПКМ по ней: карта целей и пуск. Shift+ПКМ: забрать.");
+                        } else p.sendMessage(ChatColor.RED + "Нужна ровная площадка и свободное место над ней.");
+                    } else p.sendMessage(ChatColor.GRAY + "Поставь ракету на землю (ПКМ по верху блока).");
+                    return;
+                }
+                case "armor_plate" -> {
+                    e.setCancelled(true);
+                    if (act == Action.RIGHT_CLICK_BLOCK && e.getClickedBlock() != null) {
+                        Block cell = e.getClickedBlock().getRelative(e.getBlockFace());
+                        if (cell.getType().isAir() && props.get(keyOf(cell)) == null) {
+                            placeProp("plate_" + e.getBlockFace().name(), cell);
+                            if (p.getGameMode() != GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 1);
+                            p.playSound(p.getLocation(), Sound.BLOCK_ANVIL_PLACE, 0.6f, 1.4f);
+                        }
+                    }
+                    return;
+                }
+                case "ship" -> { e.setCancelled(true); placeShip(p); return; }
+                case "plane_f", "plane_b" -> {
+                    e.setCancelled(true);
+                    if (act == Action.RIGHT_CLICK_BLOCK && e.getClickedBlock() != null) placePlane(p, e.getClickedBlock(), e.getBlockFace(), id.equals("plane_f") ? "fighter" : "bomber");
+                    return;
+                }
                 case "heli" -> {
                     e.setCancelled(true);
                     if (act == Action.RIGHT_CLICK_BLOCK && e.getClickedBlock() != null) placeHeli(p, e.getClickedBlock(), e.getBlockFace());
                     return;
                 }
-                case "grenade", "grenade_fire", "hedgehog", "mine" -> { return; }
+                case "grenade", "grenade_fire", "grenade_smoke", "hedgehog", "mine" -> { return; }
                 default -> { }
             }
         }
@@ -3884,14 +5016,14 @@ public final class Raider extends JavaPlugin implements Listener {
             e.blockList().clear();
             return;
         }
-        e.blockList().removeIf(bl -> isBase(bl) || isTurretBlock(bl) || flagAt(bl) != null);
+        e.blockList().removeIf(bl -> isBase(bl) || isTurretBlock(bl) || flagAt(bl) != null || shielded.contains(keyOf(bl)));
         hitHedgehogs(e.getLocation(), 4.5);
         recordRepairs(e.getLocation(), e.blockList());
     }
 
     @EventHandler
     public void onBlockExplode(BlockExplodeEvent e) {
-        e.blockList().removeIf(bl -> isBase(bl) || isTurretBlock(bl) || flagAt(bl) != null);
+        e.blockList().removeIf(bl -> isBase(bl) || isTurretBlock(bl) || flagAt(bl) != null || shielded.contains(keyOf(bl)));
         hitHedgehogs(e.getBlock().getLocation(), 4.5);
         recordRepairs(e.getBlock().getLocation(), e.blockList());
     }
@@ -3947,6 +5079,7 @@ public final class Raider extends JavaPlugin implements Listener {
         var pdc = e.getDamager().getPersistentDataContainer();
         Entity victim = e.getEntity();
         if (victim instanceof Interaction) { e.setCancelled(true); return; }
+        if (pdc.has(CBALL, PersistentDataType.STRING)) { if (victim instanceof Player) e.setCancelled(true); return; }
         if (pdc.has(AA, PersistentDataType.BYTE)) {
             if (!isEnemy(victim) && !isSoldier(victim)) e.setCancelled(true);
             return;
@@ -3974,6 +5107,7 @@ public final class Raider extends JavaPlugin implements Listener {
         if (id == null) return;
         if (id.equals("grenade")) sb.getPersistentDataContainer().set(GREN, PersistentDataType.STRING, "frag");
         else if (id.equals("grenade_fire")) sb.getPersistentDataContainer().set(GREN, PersistentDataType.STRING, "fire");
+        else if (id.equals("grenade_smoke")) sb.getPersistentDataContainer().set(GREN, PersistentDataType.STRING, "smoke");
     }
 
     @EventHandler
@@ -4031,20 +5165,30 @@ public final class Raider extends JavaPlugin implements Listener {
         if (en.getPersistentDataContainer().has(HELI, PersistentDataType.STRING)) {
             e.setCancelled(true);
             if (p.isSneaking() && p.getInventory().getItemInMainHand().getType() == Material.AIR && en.getPassengers().isEmpty()) {
-                giveItem(p, make("heli", 1));
+                String ak = airKind(en);
+                giveItem(p, make(ak.equals("fighter") ? "plane_f" : ak.equals("bomber") ? "plane_b" : "heli", 1));
                 helis.remove(en.getUniqueId());
                 en.remove();
-            } else if (en.getPassengers().size() < ci("heli.max-passengers")) en.addPassenger(p);
+            } else if (en.getPassengers().size() < ci(airKind(en).equals("heli") ? "heli.max-passengers" : "plane.max-passengers")) en.addPassenger(p);
             else p.sendMessage(ChatColor.RED + "Мест нет.");
             return;
         }
         if (en instanceof Interaction) {
+            String sk = en.getPersistentDataContainer().get(SHIPK, PersistentDataType.STRING);
+            if (sk != null) {
+                e.setCancelled(true);
+                int bar = sk.indexOf('|');
+                Ship sh = bar > 0 ? shipById(sk.substring(0, bar)) : null;
+                if (sh != null && !sh.sinking) shipClick(p, sh, sk.substring(bar + 1));
+                return;
+            }
             String pk = en.getPersistentDataContainer().get(PROPK, PersistentDataType.STRING);
             if (pk != null) {
                 e.setCancelled(true);
                 Prop pr = props.get(pk);
                 if (pr != null) {
                     if (p.isSneaking()) { removeProp(pr, true); p.sendMessage(ChatColor.GRAY + "Забрал."); }
+                    else if (pr.kind.startsWith("missile_")) openMap(p, pr);
                     else p.sendMessage(ChatColor.GRAY + "Shift+ПКМ: забрать.");
                 }
                 return;
@@ -4221,11 +5365,31 @@ public final class Raider extends JavaPlugin implements Listener {
                     s.sendMessage(ChatColor.YELLOW + keys.get(i) + ChatColor.WHITE + " = " + getConfig().get(keys.get(i)) + ChatColor.GRAY + " — " + DESC.get(keys.get(i)));
             }
             case "reload" -> { reloadConfig(); s.sendMessage("Конфиг перезагружен."); }
-            case "cities" -> listCities(s);
+            case "cities", "airfields" -> listCities(s);
+            case "airfield" -> {
+                if (!(s instanceof Player p)) { s.sendMessage("Только для игрока."); return true; }
+                Airfield af = new Airfield();
+                af.world = p.getWorld().getName();
+                af.x = p.getLocation().getBlockX(); af.z = p.getLocation().getBlockZ();
+                af.y = p.getWorld().getHighestBlockYAt(af.x, af.z);
+                af.ns = Math.abs(p.getLocation().getDirection().getZ()) > Math.abs(p.getLocation().getDirection().getX());
+                airfields.add(af);
+                queueAirfield(af);
+                save();
+                s.sendMessage("Строю аэродром здесь: полоса идёт в сторону твоего взгляда.");
+            }
+            case "tpair" -> {
+                if (!(s instanceof Player p) || a.length < 2) { s.sendMessage("/raider tpair <номер>"); return true; }
+                try {
+                    Airfield af = airfields.get(Integer.parseInt(a[1]) - 1);
+                    p.teleport(new Location(af.w(), af.x + 0.5, af.y + 25, af.z + 0.5));
+                } catch (Exception ex) { s.sendMessage("Нет такого аэродрома."); }
+            }
             case "country" -> {
                 if (!(s instanceof Player p)) { s.sendMessage("Только для игрока."); return true; }
                 if (a.length > 1 && a[1].equalsIgnoreCase("new")) {
                     settlements.clear();
+                    airfields.clear();
                     countryDefeated = false;
                     generateCountry(p.getWorld(), p.getLocation());
                     s.sendMessage("Генерирую новую страну...");
@@ -4252,7 +5416,7 @@ public final class Raider extends JavaPlugin implements Listener {
 
     @Override
     public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] a) {
-        if (a.length == 1) return List.of("give", "shop", "start", "stop", "wave", "status", "clear", "level", "set", "config", "reload", "cities", "country", "tpcity", "capture");
+        if (a.length == 1) return List.of("give", "shop", "start", "stop", "wave", "status", "clear", "level", "set", "config", "reload", "cities", "airfields", "airfield", "tpair", "country", "tpcity", "capture");
         if (a.length == 2 && a[0].equalsIgnoreCase("set")) {
             List<String> r = new ArrayList<>(new TreeSet<>(ALIASES.keySet()));
             r.addAll(DESC.keySet());
